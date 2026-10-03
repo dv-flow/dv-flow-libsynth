@@ -418,6 +418,8 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                                           severity=SeverityE.Error))
             return TaskDataResult(status=st or 1, changed=True, output=[], markers=markers)
 
+    if frontend == "auto":
+        frontend = "yosys"      # Yosys's own reader took it; no fallback
     prefixes = [f"{top}." if multi else "" for top in tops]
     try:
         stats = []

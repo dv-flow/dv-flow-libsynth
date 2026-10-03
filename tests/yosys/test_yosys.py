@@ -125,6 +125,7 @@ def test_counter_for_each_target(dvflow, tmp_path, target, cell):
     net = [fs for fs in out if fs.filetype == "yosysNetlist"]
     assert len(net) == 1 and "format=json" in net[0].attributes
     assert f"family={target}" in net[0].attributes and "top=count" in net[0].attributes
+    assert "frontend=yosys" in net[0].attributes
     stat = next(fs for fs in out if fs.filetype == "yosysStat")
     nums = synth.summarize(json.loads(Path(stat.basedir, "stat.json").read_text()), "count")
     assert nums[f"cells.{cell.lstrip('$')}"] > 0
