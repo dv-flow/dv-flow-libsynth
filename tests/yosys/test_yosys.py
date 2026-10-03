@@ -188,8 +188,8 @@ def test_syntax_error(dvflow, tmp_path):
 """
     status, markers, _ = _run(dvflow, tmp_path, body, "t.syn")
     assert status != 0
-    # (dv-flow adds its own unlocated "Command failed" marker)
-    (err,) = [m for m in markers if m.severity == SeverityE.Error and m.loc]
+    # (the one located error; no generic "Command failed" marker)
+    (err,) = [m for m in markers if m.severity == SeverityE.Error]
     assert err.loc.path.endswith("bad.v") and err.loc.line == 2
 
 
@@ -202,3 +202,14 @@ def test_stats_of_several_tops_are_merged_and_summed():
     assert sorted(m["modules"]) == ["\\a", "\\b"]
     assert synth.summarize(m, None) == {"cells": 7, "wire_bits": 4, "cells._NOT_": 3,
                                         "cells._XOR_": 4}
+
+
+def test_unmodeled_cells_are_found(tmp_path):
+    (tmp_path / "models.v").write_text('`include "more.vh"\nmodule LUT4(); endmodule\n')
+    (tmp_path / "more.vh").write_text("module FF(); endmodule\n")
+    (tmp_path / "net.v").write_text(
+        "module top(a);\n  LUT4 _1_ (\n    .A(a)\n  );\n  FF \\q_reg[0] (.D(a));\n"
+        "  always @* if (a) x = 1;\n  else if (a) x = 0;\n"
+        "  MULT18X18D m0 (.A0(a));\n  MULT18X18D m1 (.A0(a));\nendmodule\n")
+    assert synth.unmodeled_cells([str(tmp_path / "net.v")], [str(tmp_path / "models.v")]) \
+        == {"MULT18X18D": 2}

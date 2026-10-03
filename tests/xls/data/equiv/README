@@ -1,0 +1,3 @@
+gcd_bin_sv.ir and gcd_bin_dslx.ir: gcd_binary at 8 bits, from fw-hdl's E4 SV port and
+from XLS's gcd.x (Copyright The XLS Authors, Apache-2.0), both after opt_main.
+The solver does not prove them equal within minutes; every input does.

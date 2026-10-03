@@ -15,6 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from ..execq import exec_expected
 from dv_flow.mgr import (FileSet, SeverityE, TaskDataInput, TaskDataResult, TaskMarker,
                          TaskMarkerLoc, TaskRunCtxt)
 
@@ -285,6 +286,43 @@ def _read(path: str) -> str:
         return ""
 
 
+_MODULE = re.compile(r"^\s*module\s+([A-Za-z_][\w$]*)", re.M)
+_INCLUDE = re.compile(r'^\s*`include\s+"([^"]+)"', re.M)
+_INSTANCE = re.compile(r"^\s+([A-Za-z_][\w$]*)\s+(?:#\s*\(.*?\)\s*)?\\?[\w$.\[\]]+\s*\(",
+                       re.M | re.S)
+
+
+_KEYWORDS = {"module", "assign", "wire", "reg", "input", "output", "inout", "if", "else",
+             "case", "casez", "casex", "begin", "end", "always", "initial", "for", "while",
+             "repeat", "function", "task", "generate", "localparam", "parameter"}
+
+
+def defined_modules(paths: List[str]) -> set:
+    """Modules the files define, following their `include`s."""
+    out, seen, todo = set(), set(), list(paths)
+    while todo:
+        p = todo.pop()
+        if p in seen or not os.path.isfile(p):
+            continue
+        seen.add(p)
+        text = _read(p)
+        out |= set(_MODULE.findall(text))
+        todo += [os.path.join(os.path.dirname(p), f) for f in _INCLUDE.findall(text)]
+    return out
+
+
+def unmodeled_cells(netlists: List[str], models: List[str]) -> Dict[str, int]:
+    """Cell types the netlists instantiate that neither they nor the models
+    define: a simulator will not find them."""
+    defined = defined_modules(models + netlists)
+    missing: Dict[str, int] = {}
+    for n in netlists:
+        for cell in _INSTANCE.findall(_read(n)):
+            if cell not in defined and cell not in _KEYWORDS:
+                missing[cell] = missing.get(cell, 0) + 1
+    return missing
+
+
 def merge_stats(stats: List[dict]) -> dict:
     """One `stat -json` document from several runs (one per top)."""
     out = {"creator": stats[0].get("creator", ""), "modules": {}}
@@ -330,7 +368,7 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
         with open(ys, "w") as f:
             f.write(text)
         log = os.path.join(rundir, f"{prefix}synth.log")
-        st = await ctxt.exec([yosys, "-q", "-l", log, ys], logfile=f"{prefix}yosys.out",
+        st = await exec_expected(ctxt, [yosys, "-q", "-l", log, ys], logfile=f"{prefix}yosys.out",
                              cwd=rundir)
         return st, _read(log)
 
@@ -423,4 +461,15 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
         out.append(FileSet(src=input.name, filetype="verilogSource", basedir=rundir,
                            files=[pre + FORMATS["verilog"][1] for pre in prefixes],
                            attributes=["format=verilog"] + attrs))
+        if dd is not None:
+            missing = unmodeled_cells(
+                [os.path.join(rundir, pre + FORMATS["verilog"][1]) for pre in prefixes],
+                [os.path.join(dd, m) for m in t.sim_models])
+            if missing:
+                cells = ", ".join(f"{c} (x{n})" for c, n in sorted(missing.items()))
+                markers.append(TaskMarker(
+                    msg=f"the {p.target} netlist uses cells that Yosys's simulation models "
+                        f"do not model: {cells}. A gate-level simulation of it will not "
+                        f"build; for one, synthesize with dsp: false (or bram: false)",
+                    severity=SeverityE.Warning))
     return TaskDataResult(status=0, changed=True, output=out, markers=markers)

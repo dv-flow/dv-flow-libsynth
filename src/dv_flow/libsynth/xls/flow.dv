@@ -236,10 +236,17 @@ package:
       * `equivalent` -- proven for every input;
       * `not-equivalent` -- with an input on which they differ. An error
         marker, and the task fails, unless `gate` is false;
-      * `inconclusive` -- the solver did not finish within `timeout_s`. A
-        warning, unless `require_proof` is set. Large or multiplier-heavy
-        functions can end here; it is not a pass;
+      * `inconclusive` -- the solver did not finish within `timeout_s`, and
+        the function is too wide to compare exhaustively. A warning, unless
+        `require_proof` is set. Large or multiplier-heavy functions can end
+        here; it is not a pass;
       * `error` -- the tool could not compare them (different types, ...).
+
+      **Exhaustive fallback.** When the solver does not finish and the
+      function's inputs total at most `exhaustive_max_bits` bits, both
+      functions are generated as combinational Verilog and compared on
+      every input with Verilator (on `PATH`). That is a proof too, and the
+      report's `method` says `exhaustive`; a mismatch names the first input.
 
       Output -- `xlsEquivReport`: `equiv.json`, with both packages, the
       verdict, the counterexample and the time taken (with `pairs`: the
@@ -264,6 +271,10 @@ package:
         doc: Fail the task when the solver does not finish
         type: bool
         value: false
+      exhaustive_max_bits:
+        doc: Compare on every input when the solver does not finish and the inputs total this many bits or fewer; 0 -- never
+        type: int
+        value: 20
       pairs:
         doc: Pairs to check, `<top>=<top>` by package top function; empty -- the two inputs
         type: list

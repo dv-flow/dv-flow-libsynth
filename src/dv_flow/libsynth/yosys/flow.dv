@@ -76,6 +76,11 @@ package:
         otherwise drives a net connected to a model's input with the port's
         default value, and holds a bench's reset low.
 
+        Yosys's models do not cover every cell: for ECP5 the DSP blocks
+        (`MULT18X18D`, `ALU54B`) are black boxes. When the netlist uses a
+        cell no model defines, a warning names it; synthesize the simulated
+        netlist with `dsp: false` (or `bram: false`) instead.
+
       **Diagnostics.** Each Yosys `ERROR:` and (with `warnings`) `Warning:`
       line becomes a marker, at its file and line when it names one. A
       line of XLS-generated Verilog is reported on the source line it came

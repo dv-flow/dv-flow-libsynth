@@ -23,6 +23,7 @@ from typing import List, Optional
 from dv_flow.mgr import (FileSet, SeverityE, TaskDataInput, TaskDataResult, TaskMarker,
                          TaskMarkerLoc, TaskRunCtxt)
 
+from ..execq import exec_expected
 from .codegen import find_tool
 
 _RUN = re.compile(r"^\[ RUN (?:UNITTEST|QUICKCHECK)\s*\] (\S+)")
@@ -138,7 +139,7 @@ async def DslxTest(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
             cmd.append(f"--dslx_stdlib_path={stdlib}")
         if p.test_filter:
             cmd.append(f"--test_filter={p.test_filter}")
-        st = await ctxt.exec(cmd, logfile=log, cwd=rundir)
+        st = await exec_expected(ctxt, cmd, logfile=log, cwd=rundir)
         with open(log, errors="replace") as f:
             res = parse_test_log(f.read(), rundir)
         for fl in res.failures:

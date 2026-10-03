@@ -106,3 +106,82 @@ package:
     rep = json.loads(Path(fs.basedir, "equiv.json").read_text())
     assert rep["verdict"] == "not-equivalent" and "verdict=not-equivalent" in fs.attributes
     assert [r["verdict"] for r in rep["pairs"]] == ["equivalent", "not-equivalent"]
+
+
+def test_exhaustive_bench_matches_inputs_by_position():
+    from dv_flow.libsynth.xls.equiv import _ports, exhaustive_tb
+    sig = ('data_ports {\n  direction: PORT_DIRECTION_INPUT\n  name: "a"\n  width: 3\n}\n'
+           'data_ports {\n  direction: PORT_DIRECTION_OUTPUT\n  name: "out"\n  width: 2\n}\n')
+    ins, outs = _ports(sig)
+    assert (ins, outs) == ([("a", 3)], [("out", 2)])
+    tb = exhaustive_tb([("a", 3), ("b", 1)], [("x", 3), ("y", 1)], "out", "o", 2)
+    assert "lhs ul (.a(i0), .b(i1), .out(yl));" in tb
+    assert "rhs ur (.x(i0), .y(i1), .o(yr));" in tb
+    assert "v < (64'd1 << 4)" in tb
+
+
+@needs_equiv
+def test_inconclusive_falls_back_to_every_input(dvflow, tmp_path):
+    # gcd_binary at 8 bits: the solver does not finish in 5 s, and two 8-bit
+    # inputs are within exhaustive_max_bits.
+    import shutil
+    if shutil.which("verilator") is None:
+        pytest.skip("verilator not on PATH")
+    status, markers, rep = _run(dvflow, tmp_path, "gcd_bin_sv.ir", "gcd_bin_dslx.ir",
+                                "    with: {timeout_s: 5}\n")
+    assert status == 0, markers
+    assert rep["method"] == "exhaustive", rep
+    assert rep["verdict"] == "equivalent" and rep["detail"] == "exhaustive: all 65536 inputs agree"
+
+
+@needs_equiv
+def test_exhaustive_finds_the_first_mismatch(dvflow, tmp_path):
+    import shutil
+    if shutil.which("verilator") is None:
+        pytest.skip("verilator not on PATH")
+    import re
+    bad = (DATA / "gcd_bin_sv.ir").read_text()
+    # Break the function: change the first literal 1 to 0. (An op cannot be
+    # swapped in place: XLS checks a node's name against its op.)
+    bad, n = re.subn(r"literal\(value=1,", "literal(value=0,", bad, count=1)
+    assert n == 1
+    (tmp_path / "bad.ir").write_text(bad)
+    p = tmp_path / "flow.dv"
+    p.write_text(f"""\
+package:
+  name: t
+  imports: [synth.xls]
+  tasks:
+  - name: a
+    uses: std.FileSet
+    with: {{type: xlsIR, base: "{tmp_path}", include: ["bad.ir"]}}
+  - name: b
+    uses: std.FileSet
+    with: {{type: xlsIR, base: "{DATA}", include: ["gcd_bin_dslx.ir"]}}
+  - name: eq
+    uses: synth.xls.Equiv
+    needs: [a, b]
+    with: {{timeout_s: 5, gate: false}}
+""")
+    outputs = {}
+
+    def listen(t, reason):
+        if reason == "leave":
+            outputs[t.name] = t.output
+    dvflow.runFlow(str(p), "t.eq", listener=listen)
+    fs = outputs["t.eq"].output[0]
+    rep = json.loads(Path(fs.basedir, "equiv.json").read_text())
+    assert rep["verdict"] == "not-equivalent", rep
+    if rep["method"] == "exhaustive":
+        assert "first:" in rep["detail"]
+
+
+@needs_equiv
+def test_a_solver_timeout_leaves_no_error_marker(dvflow, tmp_path):
+    import shutil
+    if shutil.which("verilator") is None:
+        pytest.skip("verilator not on PATH")
+    status, markers, rep = _run(dvflow, tmp_path, "gcd_bin_sv.ir", "gcd_bin_dslx.ir",
+                                "    with: {timeout_s: 2}\n")
+    assert status == 0 and rep["verdict"] == "equivalent"
+    assert not [m for m in markers if m.severity == SeverityE.Error], markers
