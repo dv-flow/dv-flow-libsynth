@@ -11,4 +11,5 @@ def dvfm_packages():
     return {
         'synth': os.path.join(d, "flow.dv"),
         'synth.xls': os.path.join(d, "xls", "flow.dv"),
+        'synth.yosys': os.path.join(d, "yosys", "flow.dv"),
     }

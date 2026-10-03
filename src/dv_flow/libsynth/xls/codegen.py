@@ -142,6 +142,10 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                 cmd.append(f"--clock_period_ps={period}")
             else:
                 cmd.append(f"--pipeline_stages={p.pipeline_stages}")
+            if p.input_valid_signal:
+                cmd.append(f"--input_valid_signal={p.input_valid_signal}")
+            if p.output_valid_signal:
+                cmd.append(f"--output_valid_signal={p.output_valid_signal}")
             if p.reset:
                 cmd += [f"--reset={p.reset}",
                         f"--reset_active_low={'true' if p.reset_active_low else 'false'}"]
@@ -187,13 +191,17 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
             with open(sv, "w") as f:
                 f.write(text)
         out += [FileSet(src=input.name, filetype="systemVerilogSource", basedir=rundir,
-                        files=[os.path.basename(sv)], params={"module": module}),
+                        files=[os.path.basename(sv)], params={"module": module},
+                        attributes=[f"module={module}"]),
                 FileSet(src=input.name, filetype="xlsModuleSignature", basedir=rundir,
-                        files=[os.path.basename(sig)], params={"module": module}),
+                        files=[os.path.basename(sig)], params={"module": module},
+                        attributes=[f"module={module}"]),
                 FileSet(src=input.name, filetype="xlsOptIR", basedir=rundir,
-                        files=[os.path.basename(opt_ir)], params={"module": module}),
+                        files=[os.path.basename(opt_ir)], params={"module": module},
+                        attributes=[f"module={module}"]),
                 FileSet(src=input.name, filetype="xlsSchedule", basedir=rundir,
-                        files=[os.path.basename(sched)], params={"module": module})]
+                        files=[os.path.basename(sched)], params={"module": module},
+                        attributes=[f"module={module}"])]
     return TaskDataResult(status=status, changed=True, output=out, markers=markers)
 
 
@@ -212,6 +220,10 @@ async def DslxToIR(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     os.makedirs(rundir, exist_ok=True)
     ir = os.path.join(rundir, f"{p.top}.ir")
     cmd = [conv, *srcs, f"--top={p.top}", f"--output_file={ir}"]
+    from .dslx import dslx_path
+    search = dslx_path(input, p.dslx_path)
+    if search:
+        cmd.append(f"--dslx_path={':'.join(search)}")
     if stdlib:
         cmd.append(f"--dslx_stdlib_path={stdlib}")
     st = await ctxt.exec(cmd, logfile=os.path.join(rundir, "ir_converter.log"), cwd=rundir)

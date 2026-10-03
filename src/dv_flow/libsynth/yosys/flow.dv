@@ -1,0 +1,137 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+package:
+  name: synth.yosys
+  desc: Yosys -- Verilog/SystemVerilog to a netlist for any target, with its numbers
+  doc: |
+    ```
+    verilogSource / systemVerilogSource ─► Synth ─► yosysNetlist (json, ...) ─► place and route
+                                                 ├► yosysStat (stat -json)  ─► reports
+                                                 └► verilogSource: cell models + netlist ─► gate-level simulation
+    ```
+
+    One task, `Synth`, for every target: a flow changes FPGA family by
+    changing `target`, and every netlist records `family=`, which a back end
+    reads to pick its place-and-route tool.
+
+    **File types**
+
+    * `yosysNetlist` -- a netlist; the `format=` attribute says which
+      (`json`, what nextpnr reads; `blif`, `edif`, `rtlil`). Attributes
+      `family=`, `target=`, `top=` and `frontend=` record how it was made.
+    * `yosysStat` -- `stat.json`, Yosys's `stat -json`: cells by type, wires,
+      and area when a liberty library was given.
+    * `libertyLib` -- a Liberty cell library, for mapping to standard cells.
+
+    **Tool** -- `yosys` on `PATH` (and `sv2v`, on `PATH` or beside `yosys`,
+    for SV that Yosys's own reader does not take). The edapack yosys-bin
+    package provides both.
+
+  tasks:
+  - name: Synth
+    desc: Synthesize Verilog/SystemVerilog with Yosys, for one target
+    doc: |
+      Reads the `verilogSource` and `systemVerilogSource` inputs (with their
+      include directories and defines; Yosys defines `SYNTHESIS` itself),
+      then runs the target's synthesis command:
+
+      | `target` | command | `device` sets |
+      |---|---|---|
+      | `generic` | `synth` | -- |
+      | `ice40` | `synth_ice40` | `-device` (`hx`, `lp`, `u`) |
+      | `ecp5`, `nexus`, `machxo2`, `machxo3` | `synth_lattice -family ecp5 / lifcl / xo2 / xo3` | `-family` |
+      | `gowin` | `synth_gowin` | `-family` |
+      | `gatemate` | `synth_gatemate` | -- |
+      | `xilinx` | `synth_xilinx` | `-family` (`xc7`, ...) |
+
+      `flatten`, `dsp` and `bram` are translated to each command's own
+      flag. Any other option of the command goes in `synth_args`. Commands
+      in `args` run after synthesis and before the netlist is written, so
+      they can change it. With a `libertyLib` input and `target: generic`,
+      the design is mapped to its cells (`dfflibmap`, `abc -liberty`).
+
+      **The top** is `top`; by default, the module named by the inputs'
+      `module=`/`top=` attributes when they agree (`synth.xls.Codegen` sets
+      `module=`), else Yosys picks it.
+
+      **The front end** (`frontend`):
+      * `yosys` -- Yosys's own reader (`read_verilog -sv`);
+      * `sv2v` -- convert to Verilog with sv2v first;
+      * `auto` (the default) -- Yosys's reader, and if that fails on SV,
+        sv2v. A note says so. XLS's output for designs with arrays of
+        arrays (AES) needs it.
+
+      **Outputs**
+
+      * `yosysNetlist` -- one per entry of `formats`;
+      * `yosysStat` -- always;
+      * with `sim_netlist` (the default) -- the netlist for gate-level
+        simulation, as `verilogSource`: first the target's cell models
+        from Yosys's data directory (`simcells.v`, `ice40/cells_sim.v`,
+        ...), then `netlist.v`. Its top has the RTL module's name and
+        ports, so a test bench for the RTL runs on it unchanged. The iCE40
+        models come with `NO_ICE40_DEFAULT_ASSIGNMENTS` defined: Verilator
+        otherwise drives a net connected to a model's input with the port's
+        default value, and holds a bench's reset low.
+
+      **Diagnostics.** Each Yosys `ERROR:` and (with `warnings`) `Warning:`
+      line becomes a marker, at its file and line when it names one. A
+      line of XLS-generated Verilog is reported on the source line it came
+      from, through the Verilog's source comments.
+    consumes:
+    - filetype: verilogSource
+    - filetype: systemVerilogSource
+    - filetype: verilogInclude
+    - filetype: systemVerilogInclude
+    - filetype: libertyLib
+    passthrough: none
+    with:
+      target:
+        doc: generic, ice40, ecp5, nexus, machxo2, machxo3, gowin, gatemate or xilinx
+        type: str
+        value: generic
+      top:
+        doc: Top module. Default -- the inputs' module param, else Yosys's choice.
+        type: str
+        value: ""
+      device:
+        doc: Device or family within the target (ice40 -device; lattice, gowin and xilinx -family)
+        type: str
+        value: ""
+      flatten:
+        doc: Flatten the hierarchy
+        type: bool
+        value: true
+      dsp:
+        doc: Map multipliers to DSP blocks where the target has them
+        type: bool
+        value: true
+      bram:
+        doc: Map memories to block RAM where the target has it
+        type: bool
+        value: true
+      frontend:
+        doc: How to read SV -- auto, yosys or sv2v
+        type: str
+        value: auto
+      formats:
+        doc: Netlist formats to write (json, blif, edif, rtlil, verilog)
+        type: list
+        value: [json]
+      sim_netlist:
+        doc: Also output the netlist and the target's cell models for simulation
+        type: bool
+        value: true
+      synth_args:
+        doc: More options for the synthesis command
+        type: list
+        value: []
+      args:
+        doc: Yosys commands to run after synthesis, before the netlist is written
+        type: list
+        value: []
+      warnings:
+        doc: Turn Yosys warnings into markers
+        type: bool
+        value: true
+    shell: pytask
+    run: dv_flow.libsynth.yosys.synth.Synth

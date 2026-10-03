@@ -1,0 +1,5 @@
+package a
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}

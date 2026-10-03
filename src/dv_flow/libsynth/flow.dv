@@ -8,6 +8,8 @@ package:
     which front end produced the input.
 
     * `synth.xls` -- Google XLS: XLS IR (or DSLX) to Verilog.
+    * `synth.yosys` -- Yosys: Verilog to a netlist for an FPGA family or a
+      cell library, its numbers, and a netlist to simulate.
 
     The tools are found on `PATH`. An IVPM project gets them there from the
     edapack binary packages.

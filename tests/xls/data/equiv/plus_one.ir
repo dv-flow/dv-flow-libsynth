@@ -1,0 +1,6 @@
+package c
+
+top fn h(x: bits[8] id=1) -> bits[8] {
+  literal.2: bits[8] = literal(value=1, id=2)
+  ret add.3: bits[8] = add(x, literal.2, id=3)
+}

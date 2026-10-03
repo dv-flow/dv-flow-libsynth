@@ -10,6 +10,10 @@ package:
     Codegen   (xlsIR         -> systemVerilogSource + xlsModuleSignature + xlsOptIR)
     ```
 
+    `DslxTest` runs a DSLX module's own tests, the reference check for the
+    DSLX half of a flow. `Equiv` proves two IR functions equivalent, e.g. a
+    port against its original.
+
     **File types**
 
     * `dslxSource` -- DSLX source files.
@@ -20,9 +24,13 @@ package:
       module's ports, channels, clock, reset and pipeline latency. A front end
       that needs the block's interface reads this, never the Verilog.
     * `xlsSchedule` -- the pipeline schedule report.
+    * `dslxTestReport` -- `DslxTest`'s results, as JSON.
+    * `xlsEquivReport` -- `Equiv`'s verdict, as JSON.
 
-    **Tools** -- `opt_main`, `codegen_main` and `ir_converter_main` from an
-    xlsynth release, found on `PATH` (or in `$XLS_BIN`).
+    **Tools** -- `opt_main`, `codegen_main`, `ir_converter_main`,
+    `dslx_interpreter_main` and `check_ir_equivalence_main` from an xlsynth
+    release, found on `PATH` (or in
+    `$XLS_BIN`).
 
   tasks:
   - name: Codegen
@@ -39,12 +47,22 @@ package:
       * `xlsSchedule` -- `<module>.schedule.textproto`.
 
       The module name is `module_name` or, by default, the package's top.
+      Each output fileset carries it as the attribute `module=<name>`, which
+      `synth.yosys.Synth` takes as its default top.
       Ready/valid channel ports are named `<channel><suffix>` from the three
       suffix parameters, and the signature records the names used.
 
       Scheduling uses either `pipeline_stages` or `clock_period_ps` with a
       `delay_model`. The default (`unit` delay model, one stage) needs no
       process library and gives the same result everywhere.
+
+      **A function** becomes a fixed-latency pipeline with no handshake. Set
+      `input_valid_signal` and `output_valid_signal` to give it one: a call
+      is presented with the input valid high, and its result comes out, in
+      order, with the output valid high. The signature records both names
+      and the latency, so a transactor never hard-codes them. The valid
+      pipeline is cleared by `reset`. A proc ignores both (its channels
+      carry their own ready/valid).
 
       **Errors point at the source.** XLS reports only errors (and glog
       lines), and cites the IR rather than the source. Each message becomes
@@ -87,6 +105,14 @@ package:
         doc: XLS delay model (unit, asap7, sky130, ...)
         type: str
         value: unit
+      input_valid_signal:
+        doc: For a function -- name of an input that marks a valid call. Empty -- no handshake.
+        type: str
+        value: ""
+      output_valid_signal:
+        doc: For a function -- name of an output that marks a valid result. Empty -- none.
+        type: str
+        value: ""
       reset:
         doc: Reset port name; empty for no reset
         type: str
@@ -125,15 +151,102 @@ package:
       package top. Output -- one `xlsIR` file, `<top>.ir`.
 
       The DSLX standard library is `stdlib_path` or `$XLS_DSLX_STDLIB_PATH`.
+
+      **Imports.** Each input fileset's base directory is on the module search
+      path, then `dslx_path`. Files kept at their paths in an upstream tree
+      (`base: orig`, `include: [xls/examples/lfsr.x]`) import each other as
+      they do upstream (`import xls.examples.lfsr`).
     consumes:
     - filetype: dslxSource
     with:
       top:
         doc: The DSLX function or proc to make the package top
         type: str
+      dslx_path:
+        doc: More directories to search for imported modules (absolute paths)
+        type: list
+        value: []
       stdlib_path:
         doc: Directory of the DSLX standard library
         type: str
         value: ""
     shell: pytask
     run: dv_flow.libsynth.xls.codegen.DslxToIR
+
+  - name: DslxTest
+    desc: Run DSLX modules' own tests (#[test], #[test_proc]) in the DSLX interpreter
+    doc: |
+      Runs `dslx_interpreter_main` on each `dslxSource` file. A file passes
+      when it parses, typechecks, and none of its tests fail. The task fails
+      if any file does not pass.
+
+      Each failure is an error marker at the failing expression, with the
+      interpreter's detail (`lhs: u8:5; rhs: u8:4; were not equal`). A
+      parse or type error is a marker at its span.
+
+      Output -- `dslxTestReport`: `dslx_tests.json`, with the passed and
+      failed tests of each file and the totals (`tests_run`, `tests_passed`,
+      `tests_failed`, `tests_skipped`).
+
+      Imports resolve as for `DslxToIR`. A release interpreter has no JIT,
+      so `#[quickcheck]` functions are skipped (and counted as skipped).
+    consumes:
+    - filetype: dslxSource
+    with:
+      dslx_path:
+        doc: More directories to search for imported modules (absolute paths)
+        type: list
+        value: []
+      stdlib_path:
+        doc: Directory of the DSLX standard library. Default -- $XLS_DSLX_STDLIB_PATH.
+        type: str
+        value: ""
+      test_filter:
+        doc: Regular expression a test name must fully match to run. Empty -- all.
+        type: str
+        value: ""
+    shell: pytask
+    run: dv_flow.libsynth.xls.dslx.DslxTest
+
+  - name: Equiv
+    desc: Prove two XLS IR functions equivalent, for all inputs
+    doc: |
+      Runs `check_ir_equivalence_main` on two IR packages: from each
+      producing task, its `xlsOptIR` if it has one (as `Codegen` does), else
+      its `xlsIR`. Their top functions must have the same argument and return
+      types; the names may differ.
+
+      The verdict is one of:
+
+      * `equivalent` -- proven for every input;
+      * `not-equivalent` -- with an input on which they differ. An error
+        marker, and the task fails, unless `gate` is false;
+      * `inconclusive` -- the solver did not finish within `timeout_s`. A
+        warning, unless `require_proof` is set. Large or multiplier-heavy
+        functions can end here; it is not a pass;
+      * `error` -- the tool could not compare them (different types, ...).
+
+      Output -- `xlsEquivReport`: `equiv.json`, with both packages, the
+      verdict, the counterexample and the time taken. The fileset's
+      `verdict=` attribute repeats the verdict.
+
+      Procs are not supported (the tool compares functions).
+    consumes:
+    - filetype: xlsOptIR
+    - filetype: xlsIR
+    passthrough: none
+    with:
+      timeout_s:
+        doc: Give up after this many seconds; 0 -- no limit
+        type: int
+        value: 300
+      gate:
+        doc: Fail the task when the functions are proven different
+        type: bool
+        value: true
+      require_proof:
+        doc: Fail the task when the solver does not finish
+        type: bool
+        value: false
+    shell: pytask
+    run: dv_flow.libsynth.xls.equiv.Equiv
