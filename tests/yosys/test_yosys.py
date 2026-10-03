@@ -191,3 +191,14 @@ def test_syntax_error(dvflow, tmp_path):
     # (dv-flow adds its own unlocated "Command failed" marker)
     (err,) = [m for m in markers if m.severity == SeverityE.Error and m.loc]
     assert err.loc.path.endswith("bad.v") and err.loc.line == 2
+
+
+def test_stats_of_several_tops_are_merged_and_summed():
+    a = {"creator": "y", "modules": {"\\a": {"num_cells": 2, "num_wire_bits": 3,
+                                            "num_cells_by_type": {"$_NOT_": 2}}}}
+    b = {"creator": "y", "modules": {"\\b": {"num_cells": 5, "num_wire_bits": 1,
+                                            "num_cells_by_type": {"$_NOT_": 1, "$_XOR_": 4}}}}
+    m = synth.merge_stats([a, b])
+    assert sorted(m["modules"]) == ["\\a", "\\b"]
+    assert synth.summarize(m, None) == {"cells": 7, "wire_bits": 4, "cells._NOT_": 3,
+                                        "cells._XOR_": 4}

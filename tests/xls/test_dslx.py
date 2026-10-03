@@ -132,3 +132,20 @@ def test_function_with_valid_signals(dvflow, tmp_path):
     sig = Path(_files(outs["t.rtl"], "xlsModuleSignature")[0]).read_text()
     assert 'input_name: "input_valid"' in sig and 'output_name: "output_valid"' in sig
     assert re.search(r"latency: \d+", sig)
+
+
+@needs_xls
+def test_several_tops_each_from_its_file(dvflow, tmp_path):
+    body = f"""\
+  - name: src
+    uses: std.FileSet
+    with: {{type: dslxSource, base: "{DSLX}", include: ["up/top.x", "up/util/inc.x"]}}
+  - name: ir
+    uses: synth.xls.DslxToIR
+    needs: [src]
+    with: {{tops: [twice, inc]}}
+"""
+    status, markers, outs = _run(dvflow, tmp_path, body, "t.ir")
+    assert status == 0, markers
+    irs = sorted(os.path.basename(f) for f in _files(outs["t.ir"], "xlsIR"))
+    assert irs == ["inc.ir", "twice.ir"]

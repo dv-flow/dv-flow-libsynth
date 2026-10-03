@@ -76,3 +76,33 @@ def test_not_equivalent_is_data_without_gate(dvflow, tmp_path):
                                 "    with: {gate: false}\n")
     assert status == 0 and rep["verdict"] == "not-equivalent"
     assert any(m.severity == SeverityE.Warning for m in markers)
+
+
+@needs_equiv
+def test_pairs_by_top_name(dvflow, tmp_path):
+    p = tmp_path / "flow.dv"
+    p.write_text(f"""\
+package:
+  name: t
+  imports: [synth.xls]
+  tasks:
+  - name: irs
+    uses: std.FileSet
+    with: {{type: xlsIR, base: "{DATA}", include: ["twice_add.ir", "twice_shift.ir", "plus_one.ir"]}}
+  - name: eq
+    uses: synth.xls.Equiv
+    needs: [irs]
+    with: {{pairs: ["f=g", "f=h"], gate: false}}
+""")
+    markers, outputs = [], {}
+
+    def listen(t, reason):
+        if reason == "leave":
+            markers.extend(t.result.markers)
+            outputs[t.name] = t.output
+    status, _ = dvflow.runFlow(str(p), "t.eq", listener=listen)
+    assert status == 0, markers
+    fs = outputs["t.eq"].output[0]
+    rep = json.loads(Path(fs.basedir, "equiv.json").read_text())
+    assert rep["verdict"] == "not-equivalent" and "verdict=not-equivalent" in fs.attributes
+    assert [r["verdict"] for r in rep["pairs"]] == ["equivalent", "not-equivalent"]

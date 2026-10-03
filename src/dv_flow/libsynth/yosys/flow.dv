@@ -49,9 +49,12 @@ package:
       they can change it. With a `libertyLib` input and `target: generic`,
       the design is mapped to its cells (`dfflibmap`, `abc -liberty`).
 
-      **The top** is `top`; by default, the module named by the inputs'
-      `module=`/`top=` attributes when they agree (`synth.xls.Codegen` sets
-      `module=`), else Yosys picks it.
+      **The top** is `top`. By default it is the module the inputs name in
+      their `module=`/`top=` attributes (`synth.xls.Codegen` sets `module=`).
+      When they name several (one module per function, say), each is
+      synthesized by its own Yosys run (`<module>.synth.ys`, ...), its
+      netlist files are `<module>.netlist.json` and so on, and `stat.json`
+      holds every module. With no names, Yosys picks the top.
 
       **The front end** (`frontend`):
       * `yosys` -- Yosys's own reader (`read_verilog -sv`);

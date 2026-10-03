@@ -205,6 +205,16 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     return TaskDataResult(status=status, changed=True, output=out, markers=markers)
 
 
+def _defining_file(srcs: List[str], top: str) -> Optional[str]:
+    """The DSLX file that defines function or proc *top*: the only one, or
+    the one whose text declares it."""
+    if len(srcs) == 1:
+        return srcs[0]
+    pat = re.compile(r"^\s*(?:pub\s+)?(?:fn|proc)\s+" + re.escape(top) + r"\b", re.M)
+    found = [f for f in srcs if pat.search(_read(f))]
+    return found[0] if len(found) == 1 else None
+
+
 async def DslxToIR(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     conv = find_tool("ir_converter_main")
     if conv is None:
@@ -213,22 +223,37 @@ async def DslxToIR(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     srcs = input_files(input, "dslxSource")
     if not srcs:
         return _error("DslxToIR: no dslxSource input")
-    if not p.top:
-        return _error("DslxToIR: `top` is required")
+    tops = list(dict.fromkeys(([p.top] if p.top else []) + list(p.tops or [])))
+    if not tops:
+        return _error("DslxToIR: give `top` or `tops`")
     stdlib = p.stdlib_path or os.environ.get("XLS_DSLX_STDLIB_PATH", "")
     rundir = input.rundir
     os.makedirs(rundir, exist_ok=True)
-    ir = os.path.join(rundir, f"{p.top}.ir")
-    cmd = [conv, *srcs, f"--top={p.top}", f"--output_file={ir}"]
     from .dslx import dslx_path
     search = dslx_path(input, p.dslx_path)
-    if search:
-        cmd.append(f"--dslx_path={':'.join(search)}")
-    if stdlib:
-        cmd.append(f"--dslx_stdlib_path={stdlib}")
-    st = await ctxt.exec(cmd, logfile=os.path.join(rundir, "ir_converter.log"), cwd=rundir)
-    if st != 0:
-        return TaskDataResult(status=st, changed=True, output=[])
+    irs, status = [], 0
+    markers: List[TaskMarker] = []
+    for top in tops:
+        src = _defining_file(srcs, top)
+        if src is None:
+            markers.append(TaskMarker(
+                msg=f"DslxToIR: no single dslxSource file defines `{top}`",
+                severity=SeverityE.Error))
+            status = 1
+            continue
+        ir = os.path.join(rundir, f"{top}.ir")
+        cmd = [conv, src, f"--top={top}", f"--output_file={ir}"]
+        if search:
+            cmd.append(f"--dslx_path={':'.join(search)}")
+        if stdlib:
+            cmd.append(f"--dslx_stdlib_path={stdlib}")
+        st = await ctxt.exec(cmd, logfile=os.path.join(rundir, f"{top}.ir_converter.log"),
+                             cwd=rundir)
+        if st != 0:
+            status = st
+            continue
+        irs.append(os.path.basename(ir))
+    if status:
+        return TaskDataResult(status=status, changed=True, output=[], markers=markers)
     return TaskDataResult(status=0, changed=True, output=[
-        FileSet(src=input.name, filetype="xlsIR", basedir=rundir,
-                files=[os.path.basename(ir)], params={"top": p.top})])
+        FileSet(src=input.name, filetype="xlsIR", basedir=rundir, files=irs)])

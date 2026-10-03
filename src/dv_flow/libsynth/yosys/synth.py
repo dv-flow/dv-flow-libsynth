@@ -165,7 +165,8 @@ def read_commands(src: Sources, sv2v_out: Optional[str]) -> List[str]:
 
 
 def script(src: Sources, t: Target, p, top: Optional[str], rundir: str,
-           sv2v_out: Optional[str]) -> str:
+           sv2v_out: Optional[str], prefix: str = "") -> str:
+    """The Yosys script for one top. Output files are named `<prefix><file>`."""
     lines = read_commands(src, sv2v_out)
     for lib in src.liberty:
         lines.append(f"read_liberty -lib {lib}")
@@ -176,11 +177,11 @@ def script(src: Sources, t: Target, p, top: Optional[str], rundir: str,
     # The user's commands change the netlist, so they come before the writes.
     lines += list(p.args or [])
     stat = f"stat -json" + (f" -liberty {src.liberty[0]}" if src.liberty else "")
-    lines.append(f"tee -q -o {os.path.join(rundir, 'stat.json')} {stat}")
+    lines.append(f"tee -q -o {os.path.join(rundir, prefix + 'stat.json')} {stat}")
     lines.append("stat" + (f" -liberty {src.liberty[0]}" if src.liberty else ""))
     for f in formats(p):
         cmd, name = FORMATS[f]
-        lines.append(f"{cmd} {os.path.join(rundir, name)}")
+        lines.append(f"{cmd} {os.path.join(rundir, prefix + name)}")
     return "\n".join(lines) + "\n"
 
 
@@ -249,6 +250,14 @@ def summarize(stat: dict, top: Optional[str]) -> Dict[str, int]:
         m = design
     elif len(mods) == 1:
         m = next(iter(mods.values()))
+    elif mods:
+        # Several unrelated tops (one per function): their sum.
+        m = {"num_cells": 0, "num_wire_bits": 0, "num_cells_by_type": {}}
+        for x in mods.values():
+            m["num_cells"] += int(x.get("num_cells", 0))
+            m["num_wire_bits"] += int(x.get("num_wire_bits", 0))
+            for k, v in (x.get("num_cells_by_type") or {}).items():
+                m["num_cells_by_type"][k] = m["num_cells_by_type"].get(k, 0) + int(v)
     if not m:
         return {}
     out = {"cells": int(m.get("num_cells", 0)), "wire_bits": int(m.get("num_wire_bits", 0))}
@@ -276,6 +285,14 @@ def _read(path: str) -> str:
         return ""
 
 
+def merge_stats(stats: List[dict]) -> dict:
+    """One `stat -json` document from several runs (one per top)."""
+    out = {"creator": stats[0].get("creator", ""), "modules": {}}
+    for st in stats:
+        out["modules"].update(st.get("modules", {}))
+    return out
+
+
 async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     yosys = find_yosys()
     if yosys is None:
@@ -287,9 +304,13 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     src = collect(input)
     if not src.files:
         return _error("Synth: no verilogSource or systemVerilogSource input")
-    top = p.top or (src.modules[-1] if len(set(src.modules)) == 1 else None)
     if p.frontend not in ("auto", "yosys", "sv2v"):
         return _error(f"frontend {p.frontend!r}: one of auto, yosys, sv2v")
+    # The tops: `top`, else the modules the inputs name (each synthesized on
+    # its own, as Yosys keeps only one top per run), else Yosys's choice.
+    tops: List[Optional[str]] = [p.top] if p.top else \
+        (list(dict.fromkeys(src.modules)) or [None])
+    multi = len(tops) > 1
     rundir = input.rundir
     os.makedirs(rundir, exist_ok=True)
     try:
@@ -299,16 +320,18 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
 
     markers: List[TaskMarker] = []
 
-    async def run(sv2v_out: Optional[str]) -> Tuple[int, str]:
+    async def run(top, sv2v_out: Optional[str]) -> Tuple[int, str]:
+        prefix = f"{top}." if multi else ""
         try:
-            text = script(src, t, p, top, rundir, sv2v_out)
+            text = script(src, t, p, top, rundir, sv2v_out, prefix)
         except ValueError as e:
             return -1, str(e)
-        ys = os.path.join(rundir, "synth.ys")
+        ys = os.path.join(rundir, f"{prefix}synth.ys")
         with open(ys, "w") as f:
             f.write(text)
-        log = os.path.join(rundir, "synth.log")
-        st = await ctxt.exec([yosys, "-q", "-l", log, ys], logfile="yosys.out", cwd=rundir)
+        log = os.path.join(rundir, f"{prefix}synth.log")
+        st = await ctxt.exec([yosys, "-q", "-l", log, ys], logfile=f"{prefix}yosys.out",
+                             cwd=rundir)
         return st, _read(log)
 
     async def sv2v() -> Optional[str]:
@@ -327,48 +350,59 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
             return None
         return out
 
-    frontend = p.frontend
+    frontend, conv = p.frontend, None
     if frontend == "sv2v":
         conv = await sv2v()
         if conv is None:
             return TaskDataResult(status=1, changed=True, output=[], markers=markers)
-        st, log = await run(conv)
-    else:
-        st, log = await run(None)
+    for n, top in enumerate(tops):
+        st, log = await run(top, conv)
         if st == -1:
             return _error(log)
-        if st != 0 and frontend == "auto" and any(sv for _, sv in src.files):
+        if st != 0 and n == 0 and frontend == "auto" and any(sv for _, sv in src.files):
             # Yosys's own reader takes much of SV but not all of it (XLS's
-            # multi-dimensional arrays, for one). Try again through sv2v.
+            # multi-dimensional arrays, for one). Try again through sv2v, and
+            # keep using it for the other tops.
             first = log_markers(log, warnings=False)
-            conv = await sv2v()
-            if conv is not None:
-                st2, log2 = await run(conv)
+            c = await sv2v()
+            if c is not None:
+                st2, log2 = await run(top, c)
                 if st2 == 0:
                     why = first[0].msg if first else "a read error"
                     markers.append(TaskMarker(
                         msg=f"Yosys's SV reader failed ({why}); read through sv2v instead",
                         severity=SeverityE.Info))
-                    frontend, st, log = "sv2v", st2, log2
-    markers += log_markers(log, warnings=p.warnings)
-    if st != 0:
-        if not any(m.severity == SeverityE.Error for m in markers):
-            markers.append(TaskMarker(msg=f"yosys exited {st} (see {rundir}/synth.log)",
-                                      severity=SeverityE.Error))
-        return TaskDataResult(status=st or 1, changed=True, output=[], markers=markers)
+                    frontend, conv, st, log = "sv2v", c, st2, log2
+        markers += log_markers(log, warnings=p.warnings)
+        if st != 0:
+            if not any(m.severity == SeverityE.Error for m in markers):
+                markers.append(TaskMarker(msg=f"yosys exited {st} (see {rundir})",
+                                          severity=SeverityE.Error))
+            return TaskDataResult(status=st or 1, changed=True, output=[], markers=markers)
 
+    prefixes = [f"{top}." if multi else "" for top in tops]
     try:
-        with open(os.path.join(rundir, "stat.json")) as f:
-            nums = summarize(json.load(f), top)
+        stats = []
+        for pre in prefixes:
+            with open(os.path.join(rundir, pre + "stat.json")) as f:
+                stats.append(json.load(f))
+        stat = merge_stats(stats) if multi else stats[0]
+        if multi:
+            with open(os.path.join(rundir, "stat.json"), "w") as f:
+                json.dump(stat, f, indent=2)
+        nums = summarize(stat, None if multi else tops[0])
     except (OSError, ValueError):
         nums = {}
     if nums:
-        ctxt.info(f"{top or 'design'} on {p.target}: {nums.get('cells', 0)} cells")
+        what = ", ".join(x for x in tops if x) or "design"
+        ctxt.info(f"{what} on {p.target}: {nums.get('cells', 0)} cells")
 
+    top = None if multi else tops[0]
     attrs = [f"family={t.family}", f"target={p.target}", f"frontend={frontend}"] \
         + ([f"top={top}"] if top else []) + ([f"device={p.device}"] if p.device else [])
     out = [FileSet(src=input.name, filetype="yosysNetlist", basedir=rundir,
-                   files=[FORMATS[f][1]], attributes=[f"format={f}"] + attrs)
+                   files=[pre + FORMATS[f][1] for pre in prefixes],
+                   attributes=[f"format={f}"] + attrs)
            for f in fmts if f != "verilog" or not p.sim_netlist]
     out.append(FileSet(src=input.name, filetype="yosysStat", basedir=rundir,
                        files=["stat.json"], attributes=attrs))
@@ -387,5 +421,6 @@ async def Synth(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                                incdirs=list(dict.fromkeys(os.path.dirname(m) or "."
                                                           for m in t.sim_models))))
         out.append(FileSet(src=input.name, filetype="verilogSource", basedir=rundir,
-                           files=[FORMATS["verilog"][1]], attributes=["format=verilog"] + attrs))
+                           files=[pre + FORMATS["verilog"][1] for pre in prefixes],
+                           attributes=["format=verilog"] + attrs))
     return TaskDataResult(status=0, changed=True, output=out, markers=markers)

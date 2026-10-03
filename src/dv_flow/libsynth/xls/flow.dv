@@ -147,8 +147,12 @@ package:
   - name: DslxToIR
     desc: Convert DSLX to an XLS IR package
     doc: |
-      Runs `ir_converter_main` on the `dslxSource` inputs, with `top` as the
-      package top. Output -- one `xlsIR` file, `<top>.ir`.
+      Runs `ir_converter_main` once per top -- `top`, then each of `tops` --
+      on the `dslxSource` file that defines it (the only input, or the one
+      that declares `fn <top>` / `proc <top>`). Output -- one `xlsIR`
+      fileset with `<top>.ir` per top, each package's top being that function
+      or proc. A parametric function cannot be a top: convert a concrete
+      wrapper instead.
 
       The DSLX standard library is `stdlib_path` or `$XLS_DSLX_STDLIB_PATH`.
 
@@ -162,6 +166,11 @@ package:
       top:
         doc: The DSLX function or proc to make the package top
         type: str
+        value: ""
+      tops:
+        doc: More tops, one IR package each
+        type: list
+        value: []
       dslx_path:
         doc: More directories to search for imported modules (absolute paths)
         type: list
@@ -216,6 +225,12 @@ package:
       its `xlsIR`. Their top functions must have the same argument and return
       types; the names may differ.
 
+      With `pairs`, it checks each pair instead, named by the packages' top
+      functions: `lfsr_pkg__lfsr7=__lfsr__lfsr7` (an SV top as
+      `fw.hdl.xls.IR` names it, and a DSLX top as `ir_converter_main`
+      mangles it, `__<module>__<function>`). Inputs may then hold any number
+      of packages.
+
       The verdict is one of:
 
       * `equivalent` -- proven for every input;
@@ -227,8 +242,9 @@ package:
       * `error` -- the tool could not compare them (different types, ...).
 
       Output -- `xlsEquivReport`: `equiv.json`, with both packages, the
-      verdict, the counterexample and the time taken. The fileset's
-      `verdict=` attribute repeats the verdict.
+      verdict, the counterexample and the time taken (with `pairs`: the
+      worst verdict, and one such entry per pair). The fileset's `verdict=`
+      attribute repeats the (worst) verdict.
 
       Procs are not supported (the tool compares functions).
     consumes:
@@ -248,5 +264,9 @@ package:
         doc: Fail the task when the solver does not finish
         type: bool
         value: false
+      pairs:
+        doc: Pairs to check, `<top>=<top>` by package top function; empty -- the two inputs
+        type: list
+        value: []
     shell: pytask
     run: dv_flow.libsynth.xls.equiv.Equiv
