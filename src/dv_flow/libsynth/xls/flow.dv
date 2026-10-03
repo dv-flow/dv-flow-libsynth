@@ -52,6 +52,13 @@ package:
       Ready/valid channel ports are named `<channel><suffix>` from the three
       suffix parameters, and the signature records the names used.
 
+      **SystemVerilog or Verilog-2001** (`system_verilog`). The SV output
+      keeps the design's assertions; the Verilog-2001 output drops them (a
+      warning says so) but is easier on downstream tools: Yosys reads it
+      directly, where XLS's SV for designs with arrays of arrays needs sv2v,
+      and for AES's encrypt it needs a third of the memory (4.9 GB against
+      14.7 GB).
+
       Scheduling uses either `pipeline_stages` or `clock_period_ps` with a
       `delay_model`. The default (`unit` delay model, one stage) needs no
       process library and gives the same result everywhere.
@@ -133,6 +140,10 @@ package:
         doc: Suffix of a channel's ready port
         type: str
         value: _rdy
+      system_verilog:
+        doc: Write SystemVerilog (default); false -- Verilog-2001, which drops the design's assertions
+        type: bool
+        value: true
       source_annotations:
         doc: Write each node's source position into the Verilog as comments (1-based, absolute paths)
         type: bool

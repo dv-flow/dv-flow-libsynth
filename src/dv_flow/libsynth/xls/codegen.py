@@ -132,7 +132,8 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
         markers += source_markers(_read(log), ir_text, srcdir, ("warning",))
 
         def codegen_cmd(period: int, sched_path: str, sv_path: str) -> List[str]:
-            cmd = [cg, opt_ir, "--generator=pipeline", "--use_system_verilog=true",
+            cmd = [cg, opt_ir, "--generator=pipeline",
+                   f"--use_system_verilog={'true' if p.system_verilog else 'false'}",
                    f"--delay_model={p.delay_model}", f"--module_name={module}",
                    f"--output_verilog_path={sv_path}", f"--output_schedule_path={sched_path}",
                    f"--streaming_channel_data_suffix={p.data_suffix}",

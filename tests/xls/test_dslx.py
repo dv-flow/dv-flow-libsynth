@@ -149,3 +149,24 @@ def test_several_tops_each_from_its_file(dvflow, tmp_path):
     assert status == 0, markers
     irs = sorted(os.path.basename(f) for f in _files(outs["t.ir"], "xlsIR"))
     assert irs == ["inc.ir", "twice.ir"]
+
+
+@needs_xls
+def test_codegen_verilog_2001(dvflow, tmp_path):
+    body = f"""\
+  - name: src
+    uses: std.FileSet
+    with: {{type: dslxSource, base: "{DSLX}", include: ["up/top.x"]}}
+  - name: ir
+    uses: synth.xls.DslxToIR
+    needs: [src]
+    with: {{top: twice}}
+  - name: rtl
+    uses: synth.xls.Codegen
+    needs: [ir]
+    with: {{module_name: twice, pipeline_stages: 2, system_verilog: false}}
+"""
+    status, markers, outs = _run(dvflow, tmp_path, body, "t.rtl")
+    assert status == 0, markers
+    v = Path(_files(outs["t.rtl"], "systemVerilogSource")[0]).read_text()
+    assert "always_ff" not in v and "always @ (posedge clk)" in v
