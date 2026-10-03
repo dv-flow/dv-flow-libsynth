@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dv-flow-libsynth"
+version = "0.0.1"
+dependencies = [
+    "dv-flow-mgr",
+]
+authors = [
+    {name = "Matthew Ballance", email = "matt.ballance@gmail.com"},
+]
+description = "dv-flow tasks for synthesis-like tools: XLS IR to Verilog, and later yosys and vendor flows"
+license = {file = "LICENSE"}
+
+[project.entry-points."dv_flow.mgr"]
+libsynth = "dv_flow.libsynth.__ext__"
+
+[tool.setuptools]
+include-package-data = true
+package-dir = {"" = "src"}
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dv_flow.libsynth" = ["**/flow.dv"]
+
+[tool.pytest.ini_options]
+markers = [
+    "xls: needs the XLS tools (opt_main, codegen_main, ir_converter_main) on PATH or in $XLS_BIN",
+]

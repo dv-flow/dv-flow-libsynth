@@ -1,0 +1,139 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+package:
+  name: synth.xls
+  desc: Google XLS -- XLS IR (or DSLX) to a pipelined Verilog module
+  doc: |
+    Two steps, each a task:
+
+    ```
+    DslxToIR  (DSLX source   -> xlsIR)          optional: a front end may emit xlsIR itself
+    Codegen   (xlsIR         -> systemVerilogSource + xlsModuleSignature + xlsOptIR)
+    ```
+
+    **File types**
+
+    * `dslxSource` -- DSLX source files.
+    * `xlsIR` -- an XLS IR package (`.ir`) with a `top`. Its `pos=` and
+      `file_number` entries name the source it came from.
+    * `xlsOptIR` -- the same package after `opt_main`: what codegen consumed.
+    * `xlsModuleSignature` -- XLS's `ModuleSignatureProto` (text format): the
+      module's ports, channels, clock, reset and pipeline latency. A front end
+      that needs the block's interface reads this, never the Verilog.
+    * `xlsSchedule` -- the pipeline schedule report.
+
+    **Tools** -- `opt_main`, `codegen_main` and `ir_converter_main` from an
+    xlsynth release, found on `PATH` (or in `$XLS_BIN`).
+
+  tasks:
+  - name: Codegen
+    desc: Optimize an XLS IR package and generate its Verilog module
+    doc: |
+      Runs `opt_main` then `codegen_main` (pipeline generator) on each
+      `xlsIR` input.
+
+      Outputs, one set per input package:
+
+      * `systemVerilogSource` -- `<module>.sv`;
+      * `xlsModuleSignature` -- `<module>.sig.textproto`;
+      * `xlsOptIR` -- `<module>.opt.ir`;
+      * `xlsSchedule` -- `<module>.schedule.textproto`.
+
+      The module name is `module_name` or, by default, the package's top.
+      Ready/valid channel ports are named `<channel><suffix>` from the three
+      suffix parameters, and the signature records the names used.
+
+      Scheduling uses either `pipeline_stages` or `clock_period_ps` with a
+      `delay_model`. The default (`unit` delay model, one stage) needs no
+      process library and gives the same result everywhere.
+
+      **Errors point at the source.** XLS reports only errors (and glog
+      lines), and cites the IR rather than the source. Each message becomes
+      a marker on the original source line, via the IR's `pos=` (0-based in
+      XLS; markers are 1-based):
+
+      * a parse or verify error that cites an IR line:col -- the node on that line;
+      * a message that names nodes (`s2 is unconditionally active`) -- each
+        node, looked up in the IR the tool read (the optimized IR, for codegen);
+      * a node `opt_main` created, which has no `pos=` -- the nearest node
+        along its operands (then its users) that has one;
+      * a clock period XLS cannot meet (its message names no node) --
+        codegen is run again at the period XLS suggests, and the critical
+        path is reported: an error on its last source line, a note on each.
+
+      The `; Running pass ...` chain is left off. Relative `file_number`
+      paths are resolved against the IR's directory, then the current one.
+
+      **Source comments** (`source_annotations`) are rewritten to be
+      1-based with absolute paths: `// /abs/src.sv:12:5` above the Verilog
+      for that source line (XLS itself prints its 0-based positions).
+      `dv_flow.libsynth.xls.diag.verilog_source()` maps a Verilog line of
+      the module back to the source, e.g. for a lint or simulation message.
+    consumes:
+    - filetype: xlsIR
+    with:
+      module_name:
+        doc: Name of the generated module. Default -- the package's top.
+        type: str
+        value: ""
+      pipeline_stages:
+        doc: Number of pipeline stages. Ignored when clock_period_ps is set.
+        type: int
+        value: 1
+      clock_period_ps:
+        doc: Target clock period in picoseconds; 0 schedules by pipeline_stages instead.
+        type: int
+        value: 0
+      delay_model:
+        doc: XLS delay model (unit, asap7, sky130, ...)
+        type: str
+        value: unit
+      reset:
+        doc: Reset port name; empty for no reset
+        type: str
+        value: rst
+      reset_active_low:
+        doc: Reset polarity
+        type: bool
+        value: false
+      data_suffix:
+        doc: Suffix of a channel's data port
+        type: str
+        value: ""
+      valid_suffix:
+        doc: Suffix of a channel's valid port
+        type: str
+        value: _vld
+      ready_suffix:
+        doc: Suffix of a channel's ready port
+        type: str
+        value: _rdy
+      source_annotations:
+        doc: Write each node's source position into the Verilog as comments (1-based, absolute paths)
+        type: bool
+        value: true
+      args:
+        doc: Extra codegen_main arguments
+        type: list
+        value: []
+    shell: pytask
+    run: dv_flow.libsynth.xls.codegen.Codegen
+
+  - name: DslxToIR
+    desc: Convert DSLX to an XLS IR package
+    doc: |
+      Runs `ir_converter_main` on the `dslxSource` inputs, with `top` as the
+      package top. Output -- one `xlsIR` file, `<top>.ir`.
+
+      The DSLX standard library is `stdlib_path` or `$XLS_DSLX_STDLIB_PATH`.
+    consumes:
+    - filetype: dslxSource
+    with:
+      top:
+        doc: The DSLX function or proc to make the package top
+        type: str
+      stdlib_path:
+        doc: Directory of the DSLX standard library
+        type: str
+        value: ""
+    shell: pytask
+    run: dv_flow.libsynth.xls.codegen.DslxToIR

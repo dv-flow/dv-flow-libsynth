@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+package:
+  name: synth
+  desc: Synthesis-like tools as dv-flow tasks -- one sub-package per tool family
+  doc: |
+    Each sub-package wraps one family of tools. A task takes the tool's own
+    input files and produces the tool's own output files; nothing here knows
+    which front end produced the input.
+
+    * `synth.xls` -- Google XLS: XLS IR (or DSLX) to Verilog.
+
+    The tools are found on `PATH`. An IVPM project gets them there from the
+    edapack binary packages.

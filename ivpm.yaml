@@ -1,0 +1,11 @@
+package:
+  name: dv-flow-libsynth
+  dep-sets:
+  - name: default-dev
+    deps:
+    - name: dv-flow-mgr
+      url: https://github.com/dv-flow/dv-flow-mgr.git
+    - name: pytest-dfm
+      url: https://github.com/dv-flow/pytest-dfm.git
+    - name: pytest
+      src: pypi

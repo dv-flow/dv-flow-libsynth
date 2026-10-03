@@ -1,0 +1,17 @@
+package twosend
+
+file_number 0 "twosend.src"
+
+top proc q<i: bits[8] in, o: bits[8] out>(st: bits[8] pos=[(0,2,2)], init={0}) {
+  chan_interface i(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface o(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  st: bits[8] = state_read(state_element=st, id=1, pos=[(0,2,2)])
+  tok: token = after_all(id=2, pos=[(0,4,2)])
+  r: (token, bits[8]) = receive(tok, channel=i, id=3, pos=[(0,5,2)])
+  t1: token = tuple_index(r, index=0, id=4)
+  x: bits[8] = tuple_index(r, index=1, id=5, pos=[(0,5,2)])
+  sx: bits[1] = bit_slice(x, start=0, width=1, id=6, pos=[(0,6,6)])
+  s1: token = send(t1, x, predicate=sx, channel=o, id=7, pos=[(0,7,4)])
+  s2: token = send(s1, st, channel=o, id=8, pos=[(0,9,4)])
+  n: () = next_value(state_element=st, value=x, id=9, pos=[(0,11,2)])
+}

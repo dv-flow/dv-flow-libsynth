@@ -1,0 +1,9 @@
+package slow
+
+file_number 0 "slow.src"
+
+top fn slow(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  m1: bits[8] = umul(a, b, id=3, pos=[(0,9,4)])
+  m2: bits[8] = umul(m1, b, id=4, pos=[(0,10,4)])
+  ret s: bits[8] = add(m2, a, id=5, pos=[(0,11,4)])
+}
