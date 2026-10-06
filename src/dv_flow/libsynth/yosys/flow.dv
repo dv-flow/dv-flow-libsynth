@@ -7,6 +7,7 @@ package:
     verilogSource / systemVerilogSource ─► Synth ─► yosysNetlist (json, ...) ─► place and route
                                                  ├► yosysStat (stat -json)  ─► reports
                                                  └► verilogSource: cell models + netlist ─► gate-level simulation
+    RTL + netlist ─► Equiv ─► yosysEquivReport (equiv.json): the netlist proven equivalent to the RTL
     ```
 
     One task, `Synth`, for every target: a flow changes FPGA family by
@@ -21,6 +22,8 @@ package:
     * `yosysStat` -- `stat.json`, Yosys's `stat -json`: cells by type, wires,
       and area when a liberty library was given.
     * `libertyLib` -- a Liberty cell library, for mapping to standard cells.
+    * `yosysEquivReport` -- `equiv.json`, `Equiv`'s verdict; the `verdict=`,
+      `target=` and `top=` attributes repeat it.
 
     **Tool** -- `yosys` on `PATH` (and `sv2v`, on `PATH` or beside `yosys`,
     for SV that Yosys's own reader does not take). The edapack yosys-bin
@@ -143,3 +146,71 @@ package:
         value: true
     shell: pytask
     run: dv_flow.libsynth.yosys.synth.Synth
+
+  - name: Equiv
+    desc: Prove a netlist equivalent to its RTL, with Yosys's equivalence flow
+    doc: |
+      Needs the RTL (`verilogSource` / `systemVerilogSource`, as given to
+      `Synth`) and the `Synth` task (with `sim_netlist`, the default): its
+      netlist and its target's cell models are the gate design, every
+      other Verilog/SV input the gold design. The cell models are flattened
+      into the netlist, so an iCE40 or ECP5 netlist is compared at the
+      level of its LUTs and flip-flops.
+
+      Yosys's flow: `equiv_make` matches the two designs' signals by name
+      (each register of the RTL with the one synthesis kept),
+      `equiv_simple -seq <seq>` and `equiv_induct -seq <seq>` prove the
+      matches, `equiv_status` counts them. The verdict:
+
+      * `equivalent` -- every match proven, the outputs among them;
+      * `not-equivalent` -- matches left unproven, and a bounded `sat`
+        search on a miter (`search_depth` cycles from the all-zero state)
+        found inputs on which the outputs differ. An error marker, and
+        the task fails, unless `gate` is false;
+      * `inconclusive` -- matches left unproven and no difference found
+        (or `timeout_s` reached). A warning, unless `require_proof`. A
+        netlist whose registers were retimed or re-encoded can end here;
+        it is not a pass;
+      * `error` -- Yosys could not compare them.
+
+      The top is `top`, else the netlist's `top=`, else the RTL's
+      `module=`. The RTL is read by Yosys's SV reader, and through sv2v
+      when that fails (`frontend`, as for `Synth`).
+
+      Output -- `yosysEquivReport`: `equiv.json` with both designs' files,
+      the target, the verdict, the counts and the time taken.
+    consumes:
+    - filetype: verilogSource
+    - filetype: systemVerilogSource
+    passthrough: none
+    with:
+      top:
+        doc: Top module. Default -- the netlist's top= attribute, else the RTL's module=.
+        type: str
+        value: ""
+      seq:
+        doc: Time steps for equiv_simple -seq and equiv_induct -seq
+        type: int
+        value: 5
+      search_depth:
+        doc: Cycles of the bounded search for a difference when matches are left unproven; 0 -- no search
+        type: int
+        value: 10
+      timeout_s:
+        doc: Give up after this many seconds; 0 -- no limit
+        type: int
+        value: 600
+      frontend:
+        doc: How to read the RTL -- auto, yosys or sv2v
+        type: str
+        value: auto
+      gate:
+        doc: Fail the task when the designs are proven different
+        type: bool
+        value: true
+      require_proof:
+        doc: Fail the task when the proof does not finish
+        type: bool
+        value: false
+    shell: pytask
+    run: dv_flow.libsynth.yosys.equiv.Equiv
