@@ -154,7 +154,9 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                 cmd.append("--source_annotation_strategy=comment")
             return cmd + list(p.args or [])
 
-        cmd = codegen_cmd(p.clock_period_ps, sched, sv) + [f"--output_signature_path={sig}"]
+        sched_ir = os.path.join(rundir, f"{module}.sched.ir")
+        cmd = codegen_cmd(p.clock_period_ps, sched, sv) + [f"--output_signature_path={sig}",
+                                                           f"--output_schedule_ir_path={sched_ir}"]
         log = os.path.join(rundir, f"{module}.codegen.log")
         st = await ctxt.exec(cmd, logfile=log, cwd=rundir)
         # positions come from the optimized IR, which is what codegen read
@@ -203,6 +205,10 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                 FileSet(src=input.name, filetype="xlsSchedule", basedir=rundir,
                         files=[os.path.basename(sched)], params={"module": module},
                         attributes=[f"module={module}"])]
+        if os.path.isfile(sched_ir):
+            out.append(FileSet(src=input.name, filetype="xlsScheduledIR", basedir=rundir,
+                               files=[os.path.basename(sched_ir)], params={"module": module},
+                               attributes=[f"module={module}"]))
     return TaskDataResult(status=status, changed=True, output=out, markers=markers)
 
 

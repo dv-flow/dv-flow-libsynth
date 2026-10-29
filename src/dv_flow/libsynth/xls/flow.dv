@@ -44,7 +44,10 @@ package:
       * `systemVerilogSource` -- `<module>.sv`;
       * `xlsModuleSignature` -- `<module>.sig.textproto`;
       * `xlsOptIR` -- `<module>.opt.ir`;
-      * `xlsSchedule` -- `<module>.schedule.textproto`.
+      * `xlsSchedule` -- `<module>.schedule.textproto`;
+      * `xlsScheduledIR` -- `<module>.sched.ir`: the IR the schedule names
+        (codegen's own passes run after `opt_main`, so some `.opt.ir` nodes
+        are not in the schedule). `Lower` reads it.
 
       The module name is `module_name` or, by default, the package's top.
       Each output fileset carries it as the attribute `module=<name>`, which
@@ -292,3 +295,106 @@ package:
         value: []
     shell: pytask
     run: dv_flow.libsynth.xls.equiv.Equiv
+
+  - name: Lower
+    desc: Lower an XLS schedule to pipeline registers + stage logic -- V4 cycle model and V5 SV
+    doc: |
+      Our own lowering of `Codegen`'s schedule (`xlsSchedule` +
+      `xlsScheduledIR`, or `xlsOptIR`), in small checkable steps
+      (`dv_flow.libsynth.xls.lower`). The structurer follows XLS codegen's
+      core rules for a function pipeline: nodes run in their scheduled stage;
+      parameters behind input flops; a value used in a later stage gets a
+      register at every boundary it crosses; literals are rematerialized, not
+      registered; output flops; a valid bit per boundary, data registers
+      load-enabled by it, everything reset to 0 by `rst`. Latency is
+      `stages + 1`, as XLS's with `flop_inputs`/`flop_outputs`.
+
+      Outputs, per module (`module=<name>` attribute, as `Codegen`):
+
+      * `systemVerilogSource` (`view=v5`) -- `<module>.v5.sv`: module
+        `<module>` with XLS's ports (`clk, rst, input_valid, <params>,
+        output_valid, out`, arrays flattened element 0 at the LSB) and one
+        combinational module per stage, `<module>__stage<s>`;
+      * `xlsV4Model` -- `<module>.v4_stages.sv` (package
+        `<module>_v4_stages_pkg`, function `stage<s>_f` per stage) and
+        `<module>.v4.sv` (class `<module>_v4` in package `<module>_v4_pkg`:
+        named stage registers, one method per stage, `tick()`, `task op()`);
+      * `xlsLowerStructure` -- `<module>.structure.json`: stages, nodes per
+        stage, registers per boundary.
+
+      With `passthrough_unlowered` (default), the `systemVerilogSource` of
+      modules not lowered (e.g. Codegen's other modules) is passed on, so a
+      consumer sees one source per module.
+    consumes:
+    - filetype: xlsSchedule
+    - filetype: xlsScheduledIR
+    - filetype: xlsOptIR
+    - filetype: systemVerilogSource
+    passthrough: none
+    with:
+      modules:
+        doc: Modules to lower (by Codegen's module name); empty -- every scheduled module
+        type: list
+        value: []
+      passthrough_unlowered:
+        doc: Pass on the systemVerilogSource of modules that are not lowered
+        type: bool
+        value: true
+    shell: pytask
+    run: dv_flow.libsynth.xls.lower_tasks.Lower
+
+  - name: LinkV4V5
+    desc: Link check V4 <-> V5, per stage -- combinational equivalence with Yosys
+    doc: |
+      For each module from `Lower` and each stage `s`: V4's
+      `stage<s>_f` (wrapped in a module with V5's stage ports) against V5's
+      `<module>__stage<s>`, as a Yosys miter (`miter -equiv -flatten`) and a
+      SAT proof over all inputs. Output -- `xlsLinkReport`:
+      `link_v4_v5.json`, one entry per stage with the verdict
+      (`equivalent`, `not-equivalent` with a counterexample, `error`), and
+      the worst as `verdict=`. Yosys on `PATH`.
+    consumes:
+    - filetype: xlsV4Model
+    - filetype: systemVerilogSource
+    passthrough: none
+    with:
+      gate:
+        doc: Fail the task unless every stage is equivalent
+        type: bool
+        value: true
+    shell: pytask
+    run: dv_flow.libsynth.xls.lower_tasks.LinkV4V5
+
+  - name: LinkV3V4
+    desc: Link check V3 <-> V4 -- per-op result and clock count, in simulation
+    doc: |
+      For each pair `<v3 class>=<module>`: a Verilator testbench runs `ops`
+      random operations through the V3 class's `task op(...)` (e.g.
+      `fw.hdl.xls.StageTLM`'s `<fn>_stage_tlm`) and through V4's
+      `<module>_v4::op`, on one clock, and compares each op's result and
+      clocks. V3's arguments are mapped to V4's flat vectors by XLS's
+      flattening (element 0 at the LSB, row-major). The witness is a trace,
+      one line per op. Output -- `xlsLinkReport`: `link_v3_v4.json`.
+      Inputs: V3's `systemVerilogSource` (and its dependencies), `Lower`'s
+      `xlsV4Model`; V5 sources (`*.v5.sv`) are ignored. Verilator on `PATH`.
+    consumes:
+    - filetype: xlsV4Model
+    - filetype: xlsLowerStructure
+    - filetype: systemVerilogSource
+    - filetype: systemVerilogInclude
+    passthrough: none
+    with:
+      pairs:
+        doc: "`<v3 class>=<lowered module>` pairs"
+        type: list
+        value: []
+      ops:
+        doc: Random operations per pair
+        type: int
+        value: 200
+      gate:
+        doc: Fail the task on a mismatch
+        type: bool
+        value: true
+    shell: pytask
+    run: dv_flow.libsynth.xls.lower_tasks.LinkV3V4
