@@ -35,7 +35,16 @@ Emitters:
   kernel: open / stage methods / commit) and ``task op()`` that times an op
   against a clock as the RTL transactor does.
 
-Run as ``python -m dv_flow.libsynth.xls.lower <opt.ir> <schedule> <outdir>``.
+Re-entry: ``Structure.to_json()`` / ``Structure.from_json()`` hold
+everything the emitters read (the parsed function -- params, nodes in IR
+order with types, ops, operands, keywords and stage --, SV names, nodes per
+stage, registers per boundary, literals). ``emit_all`` writes it beside the
+emitted files as ``<module>.structure.full.json``; ``lower_structure`` emits
+again from such a file (possibly edited), without the IR or the schedule.
+
+Run as ``python -m dv_flow.libsynth.xls.lower <opt.ir> <schedule> <outdir>
+[--module M] [--infer]`` or ``python -m dv_flow.libsynth.xls.lower
+--from-structure <m>.structure.full.json <outdir>``.
 """
 from __future__ import annotations
 
@@ -67,6 +76,13 @@ class Type:
             w *= n
         return Type(w, d, self.elem)
 
+    def to_json(self) -> dict:
+        return {"width": self.width, "dims": list(self.dims), "elem": self.elem}
+
+    @staticmethod
+    def from_json(d: dict) -> "Type":
+        return Type(int(d["width"]), [int(x) for x in d["dims"]], int(d["elem"]))
+
 
 _BITS = re.compile(r"^bits\[(\d+)\]((?:\[\d+\])*)$")
 
@@ -96,7 +112,17 @@ class Node:
     operands: List[str]
     kw: Dict[str, str]
     id: int = 0
-    stage: int = 0
+    stage: int = 0                  # set by structure(); -1: literal (rematerialized)
+
+    def to_json(self) -> dict:
+        return {"name": self.name, "type": self.type.to_json(), "op": self.op,
+                "operands": list(self.operands), "kw": dict(self.kw), "id": self.id,
+                "stage": self.stage}
+
+    @staticmethod
+    def from_json(d: dict) -> "Node":
+        return Node(d["name"], Type.from_json(d["type"]), d["op"], list(d["operands"]),
+                    dict(d["kw"]), int(d["id"]), int(d["stage"]))
 
 
 @dataclass
@@ -106,6 +132,18 @@ class Function:
     ret: str
     ret_type: Type
     nodes: Dict[str, Node]          # in IR (topological) order
+
+    def to_json(self) -> dict:
+        return {"name": self.name,
+                "params": [[p, t.to_json()] for p, t in self.params],
+                "ret": self.ret, "ret_type": self.ret_type.to_json(),
+                "nodes": [n.to_json() for n in self.nodes.values()]}
+
+    @staticmethod
+    def from_json(d: dict) -> "Function":
+        nodes = [Node.from_json(x) for x in d["nodes"]]
+        return Function(d["name"], [(p, Type.from_json(t)) for p, t in d["params"]],
+                        d["ret"], Type.from_json(d["ret_type"]), {n.name: n for n in nodes})
 
 
 def _split_top(s: str) -> List[str]:
@@ -229,6 +267,17 @@ class Reg:
     width: int
     boundary: int  # registered at the entry of stage `boundary` (0: input flops)
 
+    def to_json(self) -> dict:
+        return {"node": self.node, "width": self.width, "boundary": self.boundary}
+
+    @staticmethod
+    def from_json(d: dict) -> "Reg":
+        return Reg(d["node"], int(d["width"]), int(d["boundary"]))
+
+
+STRUCTURE_FORMAT = "dv_flow.libsynth.xls.lower.Structure"
+STRUCTURE_VERSION = 1
+
 
 @dataclass
 class Structure:
@@ -239,6 +288,41 @@ class Structure:
     stage_nodes: List[List[str]]             # non-literal nodes per stage, topo order
     regs: List[List[Reg]]                    # regs[b]: registers entering stage b; b == n_stages: output flops
     literals: List[str]
+    inferred: List[str] = field(default_factory=list)   # stages inferred (not in the schedule)
+
+    def to_json(self) -> dict:
+        """Everything the emitters and ``summary()`` read, as plain JSON.
+        ``stage_nodes`` and ``regs`` are what the emitters use for placement;
+        each node's ``stage`` is informational."""
+        return {"format": STRUCTURE_FORMAT, "version": STRUCTURE_VERSION,
+                "module": self.module, "n_stages": self.n_stages,
+                "fn": self.fn.to_json(),
+                "sv": dict(self.sv),
+                "stage_nodes": [list(x) for x in self.stage_nodes],
+                "regs": [[r.to_json() for r in rs] for rs in self.regs],
+                "literals": list(self.literals),
+                "inferred": list(self.inferred)}
+
+    def to_json_text(self) -> str:
+        return json.dumps(self.to_json(), indent=1, sort_keys=True) + "\n"
+
+    @staticmethod
+    def from_json(d) -> "Structure":
+        """From ``to_json()``'s dict, or its text."""
+        if isinstance(d, str):
+            d = json.loads(d)
+        if d.get("format") != STRUCTURE_FORMAT:
+            raise ValueError(f"not a lowering structure (format {d.get('format')!r})")
+        if d.get("version") != STRUCTURE_VERSION:
+            raise ValueError(f"structure version {d.get('version')!r}; this lowering reads {STRUCTURE_VERSION}")
+        st = Structure(Function.from_json(d["fn"]), d["module"], int(d["n_stages"]),
+                       dict(d["sv"]), [list(x) for x in d["stage_nodes"]],
+                       [[Reg.from_json(r) for r in rs] for rs in d["regs"]],
+                       list(d["literals"]), list(d.get("inferred", [])))
+        if len(st.stage_nodes) != st.n_stages or len(st.regs) != st.n_stages + 1:
+            raise ValueError(f"structure: {st.n_stages} stages but {len(st.stage_nodes)} stage node "
+                             f"lists and {len(st.regs)} register boundaries")
+        return st
 
     def reg_name(self, b: int, node: str) -> str:
         if b == 0:
@@ -259,7 +343,7 @@ class Structure:
             "stages": self.n_stages, "latency": self.n_stages + 1,
             "nodes_per_stage": [len(x) for x in self.stage_nodes],
             "literals": len(self.literals),
-            "inferred_stage_nodes": len(getattr(self, "inferred", [])),
+            "inferred_stage_nodes": len(self.inferred),
             "registers": [{"boundary": b, "count": len(rs), "bits": sum(r.width for r in rs),
                            "names": [self.reg_name(b, r.node) for r in rs]}
                           for b, rs in enumerate(self.regs)],
@@ -344,11 +428,10 @@ def structure(fn: Function, sched: Dict[str, int], module: Optional[str] = None,
     regs[n_stages] = [Reg(fn.ret, rnode.type.width, n_stages)]
     stage_nodes = [[] for _ in range(n_stages)]
     for nm, n in fn.nodes.items():
+        n.stage = stage_of[nm]
         if n.op != "literal":
             stage_nodes[stage_of[nm]].append(nm)
-    st = Structure(fn, module, n_stages, sv, stage_nodes, regs, literals)
-    st.inferred = inferred
-    return st
+    return Structure(fn, module, n_stages, sv, stage_nodes, regs, literals, inferred)
 
 
 # ---------------------------------------------------------------- op lowering
@@ -680,28 +763,77 @@ def emit_v4(st: Structure, clk_if: str = "") -> str:
 # ------------------------------------------------------------------- driver
 
 
-def lower_files(opt_ir: str, schedule: str, outdir: str, module: Optional[str] = None,
-                fn_name: Optional[str] = None, infer: bool = False) -> Dict[str, str]:
+def build_structure(opt_ir: str, schedule: str, module: Optional[str] = None,
+                    fn_name: Optional[str] = None, infer: bool = False) -> Structure:
+    """Parse the IR and the schedule, and structure them."""
     with open(opt_ir) as f:
         fn = parse_ir(f.read(), fn_name)
     with open(schedule) as f:
         sched = parse_schedule(f.read(), fn.name)
-    st = structure(fn, sched, module, infer)
+    return structure(fn, sched, module, infer)
+
+
+def emit_all(st: Structure, outdir: str) -> Dict[str, str]:
+    """Write V5, V4 (stages + class), the summary and the full structure."""
     os.makedirs(outdir, exist_ok=True)
     out = {"v5": os.path.join(outdir, f"{st.module}.v5.sv"),
            "v4_stages": os.path.join(outdir, f"{st.module}.v4_stages.sv"),
            "v4": os.path.join(outdir, f"{st.module}.v4.sv"),
-           "structure": os.path.join(outdir, f"{st.module}.structure.json")}
-    with open(out["v5"], "w") as f:
-        f.write(emit_v5(st))
-    with open(out["v4_stages"], "w") as f:
-        f.write(emit_v4_stages(st))
-    with open(out["v4"], "w") as f:
-        f.write(emit_v4(st))
-    with open(out["structure"], "w") as f:
-        json.dump(st.summary(), f, indent=1)
+           "structure": os.path.join(outdir, f"{st.module}.structure.json"),
+           "structure_full": os.path.join(outdir, f"{st.module}.structure.full.json")}
+    # render everything first: the full structure may be read from outdir
+    texts = {"v5": emit_v5(st), "v4_stages": emit_v4_stages(st), "v4": emit_v4(st),
+             "structure": json.dumps(st.summary(), indent=1), "structure_full": st.to_json_text()}
+    for k, path in out.items():
+        with open(path, "w") as f:
+            f.write(texts[k])
     return out
 
 
+def lower_files(opt_ir: str, schedule: str, outdir: str, module: Optional[str] = None,
+                fn_name: Optional[str] = None, infer: bool = False) -> Dict[str, str]:
+    return emit_all(build_structure(opt_ir, schedule, module, fn_name, infer), outdir)
+
+
+def load_structure(full_json: str) -> Structure:
+    with open(full_json) as f:
+        return Structure.from_json(json.load(f))
+
+
+def lower_structure(full_json: str, outdir: str, module: Optional[str] = None) -> Dict[str, str]:
+    """Re-entry: emit from a ``<module>.structure.full.json`` (``module``
+    renames the emitted module)."""
+    st = load_structure(full_json)
+    if module:
+        st.module = module
+    return emit_all(st, outdir)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m dv_flow.libsynth.xls.lower",
+                                 description="Lower an XLS schedule to V4 (cycle model) and V5 (SV)")
+    ap.add_argument("args", nargs="*", metavar="ARG",
+                    help="<ir> <schedule> <outdir>; with --from-structure: [<outdir>]")
+    ap.add_argument("--module", help="module name (default: from the function / the structure)")
+    ap.add_argument("--fn", dest="fn_name", help="function to lower (default: the top)")
+    ap.add_argument("--infer", action="store_true",
+                    help="place nodes the schedule does not name as soon as possible")
+    ap.add_argument("--from-structure", metavar="FILE",
+                    help="emit from a <module>.structure.full.json instead of the IR and schedule")
+    a = ap.parse_args(argv)
+    if a.from_structure:
+        if len(a.args) > 1:
+            ap.error("--from-structure takes at most one positional argument (outdir)")
+        outdir = a.args[0] if a.args else os.path.dirname(os.path.abspath(a.from_structure))
+        out = lower_structure(a.from_structure, outdir, a.module)
+    else:
+        if len(a.args) != 3:
+            ap.error("expected <ir> <schedule> <outdir>")
+        out = lower_files(*a.args, module=a.module, fn_name=a.fn_name, infer=a.infer)
+    print(json.dumps(out, indent=1))
+    return 0
+
+
 if __name__ == "__main__":
-    print(json.dumps(lower_files(*sys.argv[1:4]), indent=1))
+    sys.exit(main())

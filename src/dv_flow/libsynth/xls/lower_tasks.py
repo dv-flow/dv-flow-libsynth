@@ -43,34 +43,59 @@ def _by_module(input: TaskDataInput, filetype: str) -> Dict[str, List[str]]:
 # ---------------------------------------------------------------------- Lower
 
 
+def _full_structures(input: TaskDataInput) -> Dict[str, str]:
+    """module -> ``<module>.structure.full.json`` from xlsLowerStructure inputs
+    (the module from the fileset, else from the file name)."""
+    out: Dict[str, str] = {}
+    for fs in getattr(input, "inputs", []) or []:
+        if fs.filetype != "xlsLowerStructure":
+            continue
+        for f in fs.files:
+            if f.endswith(".structure.full.json"):
+                mod = _module_of(fs) or os.path.basename(f)[:-len(".structure.full.json")]
+                out.setdefault(mod, os.path.join(fs.basedir, f))
+    return out
+
+
 async def Lower(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     p = input.params
     scheds = _by_module(input, "xlsSchedule")
     sched_irs = _by_module(input, "xlsScheduledIR")
     opt_irs = _by_module(input, "xlsOptIR")
-    mods = list(p.modules) if p.modules else [m for m in scheds if m]
+    fulls = _full_structures(input)
+    mods = list(p.modules) if p.modules else list(dict.fromkeys(
+        [m for m in fulls] + [m for m in scheds if m]))
     if not mods:
-        return _err("Lower: no xlsSchedule input (from synth.xls.Codegen)")
+        return _err("Lower: no xlsSchedule input (from synth.xls.Codegen) "
+                    "and no xlsLowerStructure (<module>.structure.full.json)")
     rundir = input.rundir
     os.makedirs(rundir, exist_ok=True)
     out: List[FileSet] = []
     markers: List[TaskMarker] = []
     for mod in mods:
-        if mod not in scheds:
-            return _err(f"Lower: no schedule for module {mod}; have {sorted(scheds)}")
-        ir = (sched_irs.get(mod) or opt_irs.get(mod) or [None])[0]
-        if ir is None:
-            return _err(f"Lower: no xlsScheduledIR / xlsOptIR for module {mod}")
-        infer = mod not in sched_irs
-        if infer:
-            markers.append(TaskMarker(
-                msg=f"Lower: {mod}: no scheduled IR, lowering {os.path.basename(ir)}; nodes the "
-                    "schedule does not name are placed as soon as possible", severity=SeverityE.Warning))
         t0 = time.monotonic()
-        try:
-            files = L.lower_files(ir, scheds[mod][0], rundir, module=mod, infer=infer)
-        except ValueError as e:
-            return _err(f"Lower: {mod}: {e}")
+        if mod in fulls:
+            # re-entry: emit from the (possibly edited) structure; no parsing
+            try:
+                files = L.lower_structure(fulls[mod], rundir, module=mod)
+            except (ValueError, KeyError) as e:
+                return _err(f"Lower: {mod}: {fulls[mod]}: {e}")
+            ctxt.info(f"{mod}: from structure {fulls[mod]}")
+        else:
+            if mod not in scheds:
+                return _err(f"Lower: no schedule for module {mod}; have {sorted(scheds)}")
+            ir = (sched_irs.get(mod) or opt_irs.get(mod) or [None])[0]
+            if ir is None:
+                return _err(f"Lower: no xlsScheduledIR / xlsOptIR for module {mod}")
+            infer = mod not in sched_irs
+            if infer:
+                markers.append(TaskMarker(
+                    msg=f"Lower: {mod}: no scheduled IR, lowering {os.path.basename(ir)}; nodes the "
+                        "schedule does not name are placed as soon as possible", severity=SeverityE.Warning))
+            try:
+                files = L.lower_files(ir, scheds[mod][0], rundir, module=mod, infer=infer)
+            except ValueError as e:
+                return _err(f"Lower: {mod}: {e}")
         with open(files["structure"]) as f:
             summ = json.load(f)
         ctxt.info(f"{mod}: {summ['stages']} stages, nodes/stage {summ['nodes_per_stage']}, "
@@ -84,7 +109,8 @@ async def Lower(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                         files=[base("v4_stages"), base("v4")], params={"module": mod},
                         attributes=attrs + ["view=v4"]),
                 FileSet(src=input.name, filetype="xlsLowerStructure", basedir=rundir,
-                        files=[base("structure")], params={"module": mod}, attributes=attrs)]
+                        files=[base("structure"), base("structure_full")], params={"module": mod},
+                        attributes=attrs)]
     if p.passthrough_unlowered:
         for fs in getattr(input, "inputs", []) or []:
             if fs.filetype == "systemVerilogSource" and _module_of(fs) not in mods:

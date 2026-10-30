@@ -320,7 +320,13 @@ package:
         `<module>.v4.sv` (class `<module>_v4` in package `<module>_v4_pkg`:
         named stage registers, one method per stage, `tick()`, `task op()`);
       * `xlsLowerStructure` -- `<module>.structure.json`: stages, nodes per
-        stage, registers per boundary.
+        stage, registers per boundary; and `<module>.structure.full.json`:
+        the whole structure the emitters read (function, nodes, stages,
+        registers, SV names; versioned).
+
+      Re-entry: an `xlsLowerStructure` input with a
+      `<module>.structure.full.json` (e.g. a previous `Lower`'s, edited) is
+      emitted as is -- the IR and schedule of that module are not read.
 
       With `passthrough_unlowered` (default), the `systemVerilogSource` of
       modules not lowered (e.g. Codegen's other modules) is passed on, so a
@@ -329,6 +335,7 @@ package:
     - filetype: xlsSchedule
     - filetype: xlsScheduledIR
     - filetype: xlsOptIR
+    - filetype: xlsLowerStructure
     - filetype: systemVerilogSource
     passthrough: none
     with:
