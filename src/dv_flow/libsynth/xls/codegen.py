@@ -97,6 +97,54 @@ def _read(path: str) -> str:
         return ""
 
 
+#: ``Codegen``'s parameter defaults (flow.dv), for callers outside dv-flow.
+CODEGEN_DEFAULTS = dict(module_name="", pipeline_stages=1, clock_period_ps=0,
+                        delay_model="unit", input_valid_signal="", output_valid_signal="",
+                        reset="rst", reset_active_low=False, data_suffix="",
+                        valid_suffix="_vld", ready_suffix="_rdy", system_verilog=True,
+                        source_annotations=True, args=[])
+
+
+def codegen_argv(cg: str, opt_ir: str, module: str, p, period: int, sched_path: str,
+                 sv_path: str) -> List[str]:
+    """The ``codegen_main`` command ``Codegen`` runs, from its parameters *p*
+    (any object with ``CODEGEN_DEFAULTS``' attributes). Outside dv-flow,
+    ``zuspec.be.xls``'s engine adapter builds the same command from here, so
+    the two cannot drift."""
+    cmd = [cg, opt_ir, "--generator=pipeline",
+           f"--use_system_verilog={'true' if p.system_verilog else 'false'}",
+           f"--delay_model={p.delay_model}", f"--module_name={module}",
+           f"--output_verilog_path={sv_path}", f"--output_schedule_path={sched_path}",
+           f"--streaming_channel_data_suffix={p.data_suffix}",
+           f"--streaming_channel_valid_suffix={p.valid_suffix}",
+           f"--streaming_channel_ready_suffix={p.ready_suffix}"]
+    if period:
+        cmd.append(f"--clock_period_ps={period}")
+    else:
+        cmd.append(f"--pipeline_stages={p.pipeline_stages}")
+    if p.input_valid_signal:
+        cmd.append(f"--input_valid_signal={p.input_valid_signal}")
+    if p.output_valid_signal:
+        cmd.append(f"--output_valid_signal={p.output_valid_signal}")
+    if p.reset:
+        cmd += [f"--reset={p.reset}",
+                f"--reset_active_low={'true' if p.reset_active_low else 'false'}"]
+    if p.source_annotations:
+        cmd.append("--source_annotation_strategy=comment")
+    return cmd + list(p.args or [])
+
+
+def fix_source_comments(sv: str, opt_text: str, srcdir: str) -> None:
+    """XLS prints its 0-based positions in the source comments: make them
+    1-based, and the file names absolute, so they can be followed."""
+    idx = diag.IrIndex(opt_text, srcdir)
+    text = diag.absolute_source_comments(
+        _read(sv), {idx.raw_files[n]: idx.files[n] for n in idx.files})
+    text = diag.fix_source_comments(text, idx.files.values())
+    with open(sv, "w") as f:
+        f.write(text)
+
+
 async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
     opt, cg = find_tool("opt_main"), find_tool("codegen_main")
     if opt is None or cg is None:
@@ -132,31 +180,17 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
         markers += source_markers(_read(log), ir_text, srcdir, ("warning",))
 
         def codegen_cmd(period: int, sched_path: str, sv_path: str) -> List[str]:
-            cmd = [cg, opt_ir, "--generator=pipeline",
-                   f"--use_system_verilog={'true' if p.system_verilog else 'false'}",
-                   f"--delay_model={p.delay_model}", f"--module_name={module}",
-                   f"--output_verilog_path={sv_path}", f"--output_schedule_path={sched_path}",
-                   f"--streaming_channel_data_suffix={p.data_suffix}",
-                   f"--streaming_channel_valid_suffix={p.valid_suffix}",
-                   f"--streaming_channel_ready_suffix={p.ready_suffix}"]
-            if period:
-                cmd.append(f"--clock_period_ps={period}")
-            else:
-                cmd.append(f"--pipeline_stages={p.pipeline_stages}")
-            if p.input_valid_signal:
-                cmd.append(f"--input_valid_signal={p.input_valid_signal}")
-            if p.output_valid_signal:
-                cmd.append(f"--output_valid_signal={p.output_valid_signal}")
-            if p.reset:
-                cmd += [f"--reset={p.reset}",
-                        f"--reset_active_low={'true' if p.reset_active_low else 'false'}"]
-            if p.source_annotations:
-                cmd.append("--source_annotation_strategy=comment")
-            return cmd + list(p.args or [])
+            return codegen_argv(cg, opt_ir, module, p, period, sched_path, sv_path)
 
         sched_ir = os.path.join(rundir, f"{module}.sched.ir")
+        # Block IR (registers, by name) and the Verilog line map let results
+        # be mapped back to the source (zuspec.be.xls.overlay).
+        block_ir = os.path.join(rundir, f"{module}.block.ir")
+        line_map = os.path.join(rundir, f"{module}.line_map.textproto")
         cmd = codegen_cmd(p.clock_period_ps, sched, sv) + [f"--output_signature_path={sig}",
-                                                           f"--output_schedule_ir_path={sched_ir}"]
+                                                           f"--output_schedule_ir_path={sched_ir}",
+                                                           f"--output_block_ir_path={block_ir}",
+                                                           f"--output_verilog_line_map_path={line_map}"]
         log = os.path.join(rundir, f"{module}.codegen.log")
         st = await ctxt.exec(cmd, logfile=log, cwd=rundir)
         # positions come from the optimized IR, which is what codegen read
@@ -185,14 +219,7 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                 msg=f"{module}: Verilog-2001 output drops the design's assertions "
                     f"(--use_system_verilog=false)", severity=SeverityE.Warning))
         if p.source_annotations:
-            # XLS prints its 0-based positions in the comments: make them
-            # 1-based, and the file names absolute, so they can be followed.
-            idx = diag.IrIndex(opt_text, srcdir)
-            text = diag.absolute_source_comments(
-                _read(sv), {idx.raw_files[n]: idx.files[n] for n in idx.files})
-            text = diag.fix_source_comments(text, idx.files.values())
-            with open(sv, "w") as f:
-                f.write(text)
+            fix_source_comments(sv, opt_text, srcdir)
         out += [FileSet(src=input.name, filetype="systemVerilogSource", basedir=rundir,
                         files=[os.path.basename(sv)], params={"module": module},
                         attributes=[f"module={module}"]),
@@ -205,10 +232,12 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                 FileSet(src=input.name, filetype="xlsSchedule", basedir=rundir,
                         files=[os.path.basename(sched)], params={"module": module},
                         attributes=[f"module={module}"])]
-        if os.path.isfile(sched_ir):
-            out.append(FileSet(src=input.name, filetype="xlsScheduledIR", basedir=rundir,
-                               files=[os.path.basename(sched_ir)], params={"module": module},
-                               attributes=[f"module={module}"]))
+        for path, ftype in ((sched_ir, "xlsScheduledIR"), (block_ir, "xlsBlockIR"),
+                            (line_map, "xlsVerilogLineMap")):
+            if os.path.isfile(path):
+                out.append(FileSet(src=input.name, filetype=ftype, basedir=rundir,
+                                   files=[os.path.basename(path)], params={"module": module},
+                                   attributes=[f"module={module}"]))
     return TaskDataResult(status=status, changed=True, output=out, markers=markers)
 
 
