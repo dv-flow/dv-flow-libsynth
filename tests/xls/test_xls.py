@@ -152,3 +152,78 @@ def test_source_comments_are_one_based_and_absolute(dvflow, tmp_path):
     src = str(DATA / "slow.src")
     lines = {int(l) for l in re.findall(re.escape(src) + r":(\d+):5", sv)}
     assert lines and lines <= {10, 11, 12}, sv     # pos lines 9..11, 0-based
+
+
+def _pass_proc(name: str) -> str:
+    """A proc that adds 1 three times: enough depth to take 1..3 stages."""
+    ci = ("strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none")
+    return f"""package {name}
+
+top proc {name}<a: bits[8] in, o: bits[8] out>(s: (), init={{()}}) {{
+  chan_interface a(direction=receive, kind=streaming, {ci})
+  chan_interface o(direction=send, kind=streaming, {ci})
+  t: token = after_all(id=2)
+  r: (token, bits[8]) = receive(t, channel=a, id=3)
+  rt: token = tuple_index(r, index=0, id=4)
+  d: bits[8] = tuple_index(r, index=1, id=5)
+  one: bits[8] = literal(value=1, id=6)
+  x1: bits[8] = add(d, one, id=7)
+  x2: bits[8] = add(x1, one, id=8)
+  x3: bits[8] = add(x2, one, id=9)
+  s1: token = send(rt, x3, channel=o, id=10)
+  s: () = state_read(state_element=s, id=1)
+  nv: () = next_value(state_element=s, value=s, id=11)
+}}
+"""
+
+
+@needs_xls
+def test_per_module_codegen_options(dvflow, tmp_path):
+    import json
+    (tmp_path / "blk_a.ir").write_text(_pass_proc("blk_a"))
+    (tmp_path / "blk_b.ir").write_text(_pass_proc("blk_b"))
+    (tmp_path / "opts.json").write_text(json.dumps({
+        "format": "xls.codegen-options",
+        "modules": {"blk_b": {"pipeline_stages": 3, "args": ["--flop_inputs=true"]}}}))
+    body = f"""\
+  - name: irs
+    uses: std.FileSet
+    with: {{type: xlsIR, base: "{tmp_path}", include: ["blk_a.ir", "blk_b.ir"]}}
+  - name: opts
+    uses: std.FileSet
+    with: {{type: xlsCodegenOptions, base: "{tmp_path}", include: ["opts.json"]}}
+  - name: rtl
+    uses: synth.xls.Codegen
+    needs: [irs, opts]
+    with: {{pipeline_stages: 1}}
+"""
+    status, markers, outs = _run(dvflow, tmp_path, body, "t.rtl")
+    assert status == 0, markers
+    out = outs["t.rtl"]
+    stages = {Path(p).name: Path(p).read_text().count("stages {")
+              for p in _files(out, "xlsSchedule")}
+    assert stages == {"blk_a.schedule.textproto": 1, "blk_b.schedule.textproto": 3}
+    (tc,) = _files(out, "xlsToolchain")
+    rec = json.loads(Path(tc).read_text())
+    assert [t["tool"] for t in rec["tools"]] == ["opt_main", "codegen_main"]
+    assert all(len(t["sha256"]) == 64 for t in rec["tools"])
+
+
+@needs_xls
+def test_per_module_codegen_options_reject_unknown_keys(dvflow, tmp_path):
+    import json
+    (tmp_path / "blk_a.ir").write_text(_pass_proc("blk_a"))
+    (tmp_path / "opts.json").write_text(json.dumps({"modules": {"blk_a": {"stages": 3}}}))
+    body = f"""\
+  - name: irs
+    uses: std.FileSet
+    with: {{type: xlsIR, base: "{tmp_path}", include: ["blk_a.ir"]}}
+  - name: opts
+    uses: std.FileSet
+    with: {{type: xlsCodegenOptions, base: "{tmp_path}", include: ["opts.json"]}}
+  - name: rtl
+    uses: synth.xls.Codegen
+    needs: [irs, opts]
+"""
+    status, markers, _ = _run(dvflow, tmp_path, body, "t.rtl")
+    assert status != 0 and any("unknown codegen options" in m.msg for m in markers)

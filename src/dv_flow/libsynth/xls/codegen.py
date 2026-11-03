@@ -1,9 +1,12 @@
 """synth.xls tasks: XLS IR -> Verilog (Codegen) and DSLX -> XLS IR (DslxToIR)."""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
+import types
 from typing import Dict, List, Optional, Tuple
 
 from dv_flow.mgr import (FileSet, SeverityE, TaskDataInput, TaskDataResult, TaskMarker,
@@ -134,6 +137,62 @@ def codegen_argv(cg: str, opt_ir: str, module: str, p, period: int, sched_path: 
     return cmd + list(p.args or [])
 
 
+#: Codegen parameters an ``xlsCodegenOptions`` file may set per module.
+PER_MODULE_KEYS = ("pipeline_stages", "clock_period_ps", "delay_model", "reset",
+                   "reset_active_low", "args")
+
+
+def module_options(input: TaskDataInput) -> Dict[str, dict]:
+    """Per-module overrides from the ``xlsCodegenOptions`` inputs: JSON files
+    ``{"format": "xls.codegen-options", "modules": {<module>: {<param>: value}}}``.
+    ``args`` is appended to the task's own; every other key replaces the task
+    parameter for that module only."""
+    out: Dict[str, dict] = {}
+    for path in input_files(input, "xlsCodegenOptions"):
+        with open(path) as f:
+            data = json.load(f)
+        for mod, opts in (data.get("modules") or {}).items():
+            bad = set(opts) - set(PER_MODULE_KEYS)
+            if bad:
+                raise ValueError(f"{path}: module {mod}: unknown codegen options {sorted(bad)}")
+            cur = out.setdefault(mod, {})
+            for k, v in opts.items():
+                cur[k] = (cur.get(k, []) + list(v)) if k == "args" else v
+    return out
+
+
+def with_overrides(p, opts: dict):
+    """*p* (the task parameters) with one module's overrides applied."""
+    if not opts:
+        return p
+    q = types.SimpleNamespace(**{k: getattr(p, k) for k in CODEGEN_DEFAULTS})
+    for k, v in opts.items():
+        setattr(q, k, (list(q.args or []) + list(v)) if k == "args" else v)
+    return q
+
+
+def toolchain_record(tool: str) -> dict:
+    """What ran: the tool's path, its content hash and, for an xlsynth-bin
+    install, the release from its manifest (the tools print `redacted` for
+    --version)."""
+    real = os.path.realpath(tool)
+    h = hashlib.sha256()
+    with open(real, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    rec = {"tool": os.path.basename(tool), "path": real, "sha256": h.hexdigest()}
+    d = os.path.dirname(real)
+    for cand in (os.path.join(d, "..", "manifest.json"), os.path.join(d, "..", "..", "manifest.json")):
+        try:
+            with open(cand) as f:
+                m = json.load(f)
+            rec["release"] = m.get("release", {}).get("version")
+            break
+        except (OSError, ValueError):
+            continue
+    return rec
+
+
 def fix_source_comments(sv: str, opt_text: str, srcdir: str) -> None:
     """XLS prints its 0-based positions in the source comments: make them
     1-based, and the file names absolute, so they can be followed."""
@@ -158,13 +217,24 @@ async def Codegen(ctxt: TaskRunCtxt, input: TaskDataInput) -> TaskDataResult:
                       f"{len(irs)} xlsIR inputs")
     rundir = input.rundir
     os.makedirs(rundir, exist_ok=True)
-    out: List[FileSet] = []
+    try:
+        per_module = module_options(input)
+    except (OSError, ValueError) as e:
+        return _error(f"Codegen: {e}")
+    tc = os.path.join(rundir, "toolchain.json")
+    with open(tc, "w") as f:
+        json.dump({"format": "xls.toolchain", "tools": [toolchain_record(opt),
+                                                         toolchain_record(cg)]}, f, indent=2)
+    out: List[FileSet] = [FileSet(src=input.name, filetype="xlsToolchain", basedir=rundir,
+                                  files=["toolchain.json"])]
     markers: List[TaskMarker] = []
     status = 0
+    task_params = p
     for ir_path in irs:
         ir_text = _read(ir_path)
         top = ir_top(ir_text)
-        module = p.module_name or re.sub(r"\W", "_", top or "top")
+        module = task_params.module_name or re.sub(r"\W", "_", top or "top")
+        p = with_overrides(task_params, per_module.get(module, {}))
         srcdir = os.path.dirname(ir_path)
         opt_ir = os.path.join(rundir, f"{module}.opt.ir")
         sv = os.path.join(rundir, f"{module}.sv")

@@ -96,8 +96,20 @@ package:
       for that source line (XLS itself prints its 0-based positions).
       `dv_flow.libsynth.xls.diag.verilog_source()` maps a Verilog line of
       the module back to the source, e.g. for a lint or simulation message.
+
+      **Per-module options.** An `xlsCodegenOptions` input -- JSON
+      `{"format": "xls.codegen-options", "modules": {<module>: {...}}}` --
+      overrides `pipeline_stages`, `clock_period_ps`, `delay_model`, `reset`
+      and `reset_active_low` for one module, and appends to `args`. That is
+      how one task builds several blocks with different schedules.
+
+      **Toolchain record.** `toolchain.json` (`xlsToolchain`) names the
+      `opt_main` and `codegen_main` that ran: path, SHA-256 and, for an
+      xlsynth-bin install, its release (the tools print `redacted` for
+      `--version`).
     consumes:
     - filetype: xlsIR
+    - filetype: xlsCodegenOptions
     with:
       module_name:
         doc: Name of the generated module. Default -- the package's top.
