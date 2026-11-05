@@ -157,8 +157,20 @@ def module_options(input: TaskDataInput) -> Dict[str, dict]:
                 raise ValueError(f"{path}: module {mod}: unknown codegen options {sorted(bad)}")
             cur = out.setdefault(mod, {})
             for k, v in opts.items():
-                cur[k] = (cur.get(k, []) + list(v)) if k == "args" else v
+                cur[k] = merge_args(cur.get(k, []), v) if k == "args" else v
     return out
+
+
+def merge_args(a: List[str], b: List[str]) -> List[str]:
+    """*a* then *b*, with every ``--io_constraints`` joined into one flag
+    (codegen_main keeps only the last of a repeated flag)."""
+    ioc, out = [], []
+    for x in list(a) + list(b):
+        if x.startswith("--io_constraints="):
+            ioc += [c for c in x.split("=", 1)[1].split(",") if c and c not in ioc]
+        else:
+            out.append(x)
+    return out + (["--io_constraints=" + ",".join(ioc)] if ioc else [])
 
 
 def with_overrides(p, opts: dict):
@@ -167,7 +179,7 @@ def with_overrides(p, opts: dict):
         return p
     q = types.SimpleNamespace(**{k: getattr(p, k) for k in CODEGEN_DEFAULTS})
     for k, v in opts.items():
-        setattr(q, k, (list(q.args or []) + list(v)) if k == "args" else v)
+        setattr(q, k, merge_args(q.args or [], v) if k == "args" else v)
     return q
 
 
